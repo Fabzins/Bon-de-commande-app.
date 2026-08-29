@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Bons de Commande</title>
+<meta name="description" content="Créez, numérotez et exportez vos bons de commande en PDF." />
+<meta name="theme-color" content="#1E2A38" />
+<link rel="manifest" href="manifest.json" />
+<link rel="icon" href="icons/icon-192.png" />
+<link rel="apple-touch-icon" href="icons/icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<link rel="stylesheet" href="fonts.css" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<div class="app-shell">
+  <!-- Sidebar / bottom nav -->
+  <nav class="nav" id="nav">
+    <div class="nav__brand">
+      <span class="nav__badge">BC</span>
+      <span class="nav__title">Bons de<br>Commande</span>
+    </div>
+    <div class="nav__links">
+      <button class="nav__link" data-view="dashboard" aria-label="Tableau de bord">
+        <svg viewBox="0 0 24 24"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
+        <span>Tableau de bord</span>
+      </button>
+      <button class="nav__link" data-view="order-form" aria-label="Nouveau bon">
+        <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+        <span>Nouveau bon</span>
+      </button>
+      <button class="nav__link" data-view="history" aria-label="Historique">
+        <svg viewBox="0 0 24 24"><path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6a7 7 0 1 1 2.05 4.95l-1.42 1.42A9 9 0 1 0 13 3zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
+        <span>Historique</span>
+      </button>
+      <button class="nav__link" data-view="suppliers" aria-label="Fournisseurs">
+        <svg viewBox="0 0 24 24"><path d="M20 8h-3V4H3c-1.1 0-2 .9-2 2v11h2a3 3 0 1 0 6 0h6a3 3 0 1 0 6 0h2v-5l-3-4zM6 18.5A1.5 1.5 0 1 1 6 15.5a1.5 1.5 0 0 1 0 3zm13.5-9 2.04 2.5H17V9.5h2.5zM18 18.5a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3z"/></svg>
+        <span>Fournisseurs</span>
+      </button>
+      <button class="nav__link" data-view="products" aria-label="Produits">
+        <svg viewBox="0 0 24 24"><path d="M20 4H4v2h16V4zM4 20h16v-2H4v2zm0-4h16v-2H4v2zm0-4h16v-2H4v2z" transform="rotate(90 12 12)"/></svg>
+        <span>Produits</span>
+      </button>
+      <button class="nav__link" data-view="delivery-addresses" aria-label="Adresses de livraison">
+        <svg viewBox="0 0 24 24"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z"/></svg>
+        <span>Livraison</span>
+      </button>
+      <button class="nav__link" data-view="headers" aria-label="Émetteur">
+        <svg viewBox="0 0 24 24"><path d="M4 4h16v4H4V4zm0 6h10v10H4V10zm12 0h4v4h-4v-4zm0 6h4v4h-4v-4z"/></svg>
+        <span>Émetteur</span>
+      </button>
+    </div>
+    <div class="nav__foot">Données stockées localement sur cet appareil</div>
+  </nav>
+
+  <!-- Main -->
+  <main class="main">
+    <header class="topbar">
+      <button class="topbar__menu" id="menuToggle" aria-label="Menu">
+        <svg viewBox="0 0 24 24"><path d="M3 6h18v2H3V6zm0 5h18v2H3v-2zm0 5h18v2H3v-2z"/></svg>
+      </button>
+      <h1 class="topbar__title" id="viewTitle">Tableau de bord</h1>
+      <button class="btn btn-ghost" id="storageBtn" type="button">Stockage</button>
+      <button class="btn btn-brass topbar__install" id="installAppBtn" type="button" hidden>Installer l’application</button>
+    </header>
+    <div class="view" id="view"></div>
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+<div class="modal-overlay" id="modalOverlay"><div class="modal" id="modal"></div></div>
+
+<script src="vendor/jspdf.umd.min.js"></script>
+<script src="vendor/jspdf.plugin.autotable.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
