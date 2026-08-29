@@ -1420,7 +1420,20 @@ function previewOrderPdf() {
   draft.total = draft.items.reduce((s, it) => s + it.qty * it.unitPrice, 0);
   const doc = buildOrderPdf(draft);
   const blobUrl = doc.output('bloburl');
-  openModal('Aperçu du bon de commande', `<iframe title="Aperçu du bon" src="${blobUrl}" style="width:100%;height:70vh;border:1px solid var(--paper-line);border-radius:8px;background:white"></iframe><div class="modal__actions"><button type="button" class="btn btn-ghost" data-close-modal>Fermer</button></div>`);
+  // Chrome pour Android ne sait pas afficher un PDF dans une <iframe> : on l'ouvre
+  // donc dans un nouvel onglet via un lien simulé (plus fiable qu'un window.open,
+  // moins susceptible d'être bloqué comme pop-up par le navigateur).
+  const a = document.createElement('a');
+  a.href = blobUrl;
+  a.target = '_blank';
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  let opened = true;
+  try { a.click(); } catch (e) { opened = false; }
+  document.body.removeChild(a);
+  if (!opened) {
+    toast("Aperçu impossible à ouvrir : utilisez « Enregistrer » pour télécharger le PDF directement.");
+  }
 }
 
 /* ==========================================================================
