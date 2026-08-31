@@ -20,6 +20,7 @@ function load(key) {
 function save(key, data) {
   localStorage.setItem(key, JSON.stringify(data));
   queueFolderSync();
+  queueCloudSync();
 }
 
 /* ---------- Stockage local Android : dossier choisi par l'utilisateur ---------- */
@@ -159,6 +160,191 @@ async function initLocalStorageFolder() {
   const restored = await restoreFromFolderIfAvailable(storageFolderHandle);
   updateStorageButton();
   if (restored) toast('Données restaurées depuis le dossier de stockage.');
+}
+
+/* ==========================================================================
+   SYNCHRONISATION CLOUD (Firebase, optionnelle)
+   Permet de retrouver les mêmes données sur plusieurs appareils (téléphone,
+   PC...). Nécessite une connexion internet et un projet Firebase gratuit
+   configuré par l'utilisateur (voir bouton « Synchronisation »).
+   ========================================================================== */
+const CLOUD_SYNC_CONFIG_KEY = 'bc_cloud_sync_config';   // { firebaseConfig, syncCode, enabled }
+const CLOUD_SYNC_LAST_PUSH_KEY = 'bc_cloud_sync_last_push_ms';
+const FIREBASE_SDK_VERSION = '10.13.2';
+
+let cloudSync = { status: 'off', error: null, lastSyncedAt: null }; // off|loading|connected|error
+let fbApp = null, fbDb = null, fbUnsub = null;
+let cloudPushTimer = null;
+let applyingRemoteSnapshot = false;
+let firebaseScriptsPromise = null;
+
+function getCloudSyncConfig() {
+  try { return JSON.parse(localStorage.getItem(CLOUD_SYNC_CONFIG_KEY)) || null; }
+  catch (_) { return null; }
+}
+function saveCloudSyncConfig(cfg) { localStorage.setItem(CLOUD_SYNC_CONFIG_KEY, JSON.stringify(cfg)); }
+function clearCloudSyncConfig() { localStorage.removeItem(CLOUD_SYNC_CONFIG_KEY); }
+
+function loadFirebaseScripts() {
+  if (firebaseScriptsPromise) return firebaseScriptsPromise;
+  const urls = [
+    `https://www.gstatic.com/firebasejs/${FIREBASE_SDK_VERSION}/firebase-app-compat.js`,
+    `https://www.gstatic.com/firebasejs/${FIREBASE_SDK_VERSION}/firebase-auth-compat.js`,
+    `https://www.gstatic.com/firebasejs/${FIREBASE_SDK_VERSION}/firebase-firestore-compat.js`,
+  ];
+  firebaseScriptsPromise = urls.reduce((p, url) => p.then(() => new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${url}"]`)) return resolve();
+    const s = document.createElement('script');
+    s.src = url;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('Impossible de charger le SDK Firebase (vérifiez la connexion internet).'));
+    document.head.appendChild(s);
+  })), Promise.resolve());
+  return firebaseScriptsPromise;
+}
+
+function updateSyncButton() {
+  const btn = document.getElementById('syncBtn');
+  if (!btn) return;
+  const cfg = getCloudSyncConfig();
+  if (!cfg || !cfg.enabled) { btn.textContent = 'Synchronisation'; btn.title = 'Non configurée'; return; }
+  const labels = { off: 'Synchro ⏸', loading: 'Synchro…', connected: 'Synchro ✓', error: 'Synchro ⚠' };
+  btn.textContent = labels[cloudSync.status] || 'Synchronisation';
+  btn.title = cloudSync.status === 'error' ? ('Erreur : ' + (cloudSync.error || '')) :
+    cloudSync.lastSyncedAt ? ('Dernière synchro : ' + new Date(cloudSync.lastSyncedAt).toLocaleTimeString('fr-FR')) : '';
+}
+
+async function startCloudSync() {
+  const cfg = getCloudSyncConfig();
+  if (!cfg || !cfg.enabled || !cfg.firebaseConfig || !cfg.syncCode) return;
+  cloudSync.status = 'loading'; cloudSync.error = null; updateSyncButton();
+  try {
+    await loadFirebaseScripts();
+    if (!fbApp) {
+      fbApp = firebase.apps && firebase.apps.length ? firebase.app() : firebase.initializeApp(cfg.firebaseConfig);
+      await firebase.auth().signInAnonymously();
+    }
+    fbDb = firebase.firestore();
+    const docRef = fbDb.collection('workspaces').doc(cfg.syncCode);
+    if (fbUnsub) fbUnsub();
+    fbUnsub = docRef.onSnapshot((snap) => {
+      cloudSync.status = 'connected'; cloudSync.error = null; cloudSync.lastSyncedAt = Date.now();
+      if (snap.exists) applyRemoteSnapshot(snap.data());
+      updateSyncButton();
+    }, (err) => {
+      cloudSync.status = 'error'; cloudSync.error = err.message || String(err); updateSyncButton();
+    });
+    const existing = await docRef.get();
+    if (!existing.exists) await pushCloudSyncNow();
+  } catch (err) {
+    cloudSync.status = 'error'; cloudSync.error = err.message || String(err); updateSyncButton();
+  }
+}
+
+function stopCloudSync() {
+  if (fbUnsub) { fbUnsub(); fbUnsub = null; }
+  cloudSync = { status: 'off', error: null, lastSyncedAt: null };
+  updateSyncButton();
+}
+
+function applyRemoteSnapshot(remote) {
+  if (!remote || !remote.data) return;
+  const remoteMs = remote.updatedAtMs || 0;
+  const lastPush = Number(localStorage.getItem(CLOUD_SYNC_LAST_PUSH_KEY) || 0);
+  if (remoteMs <= lastPush) return; // c'est notre propre écriture qui nous revient : on ignore
+  applyingRemoteSnapshot = true;
+  try {
+    STORAGE_DB_KEYS.forEach((key) => {
+      if (remote.data[key] !== undefined) localStorage.setItem(key, JSON.stringify(remote.data[key]));
+    });
+  } finally { applyingRemoteSnapshot = false; }
+  toast('Données mises à jour depuis un autre appareil.');
+  navigate(state.view, state.view === 'order-form' ? { orderId: state.orderDraft?.id || null } : {});
+}
+
+async function pushCloudSyncNow() {
+  const cfg = getCloudSyncConfig();
+  if (!cfg || !cfg.enabled || !fbDb) return;
+  const snap = snapshotLocalData();
+  const nowMs = Date.now();
+  localStorage.setItem(CLOUD_SYNC_LAST_PUSH_KEY, String(nowMs));
+  try {
+    await fbDb.collection('workspaces').doc(cfg.syncCode).set({ data: snap.data, updatedAtMs: nowMs });
+    cloudSync.status = 'connected'; cloudSync.lastSyncedAt = nowMs; updateSyncButton();
+  } catch (err) {
+    cloudSync.status = 'error'; cloudSync.error = err.message || String(err); updateSyncButton();
+  }
+}
+
+function queueCloudSync() {
+  const cfg = getCloudSyncConfig();
+  if (!cfg || !cfg.enabled || applyingRemoteSnapshot) return;
+  clearTimeout(cloudPushTimer);
+  cloudPushTimer = setTimeout(() => pushCloudSyncNow(), 900);
+}
+
+function openSyncModal() {
+  const cfg = getCloudSyncConfig();
+  const configured = !!(cfg && cfg.enabled);
+  openModal('Synchronisation entre appareils', configured ? `
+    <div class="card__subtitle" style="margin-bottom:16px">Synchronisation active. Utilisez le même code d'équipe sur tous vos appareils pour qu'ils partagent les mêmes données.</div>
+    <div class="field"><label>Code d'équipe actuel</label><div class="input-like" style="padding:10px 12px;border:1px solid var(--paper-line);border-radius:8px;background:var(--paper);font-family:var(--font-mono)">${escapeHtml(cfg.syncCode)}</div></div>
+    <div class="field"><label>État</label><div class="input-like" style="padding:10px 12px;border:1px solid var(--paper-line);border-radius:8px;background:var(--paper)">${
+      cloudSync.status === 'connected' ? '✓ Connecté' : cloudSync.status === 'error' ? ('⚠ Erreur : ' + escapeHtml(cloudSync.error || '')) : cloudSync.status === 'loading' ? 'Connexion…' : 'Inactif'
+    }</div></div>
+    <div class="modal__actions">
+      <button type="button" class="btn btn-ghost" data-close-modal>Fermer</button>
+      <button type="button" class="btn btn-ghost" id="syncNowBtn">Forcer une synchro</button>
+      <button type="button" class="btn btn-danger" id="disableSyncBtn">Désactiver</button>
+    </div>
+  ` : `
+    <div class="card__subtitle" style="margin-bottom:16px">Colle ici la configuration de ton projet Firebase (obtenue dans la console Firebase → Paramètres du projet → Général → application web), puis choisis un code d'équipe secret à utiliser sur tous tes appareils.</div>
+    <div class="field"><label>Configuration Firebase (bloc firebaseConfig = { ... })</label><textarea id="syncConfigInput" rows="7" placeholder='const firebaseConfig = {
+  apiKey: "...",
+  authDomain: "...",
+  projectId: "...",
+  ...
+};'></textarea></div>
+    <div class="field"><label>Code d'équipe</label><input id="syncCodeInput" type="text" placeholder="Choisis un code secret, ex. hydrodis-benin-2026"><small>Utilise EXACTEMENT le même code sur tous les appareils à synchroniser. Garde-le confidentiel : toute personne qui le connaît (et a accès à ta config) peut voir tes données.</small></div>
+    <div class="modal__actions">
+      <button type="button" class="btn btn-ghost" data-close-modal>Annuler</button>
+      <button type="button" class="btn btn-primary" id="enableSyncBtn">Activer la synchronisation</button>
+    </div>
+  `, (modal) => {
+    modal.querySelector('#enableSyncBtn')?.addEventListener('click', async () => {
+      const raw = modal.querySelector('#syncConfigInput').value.trim();
+      const code = modal.querySelector('#syncCodeInput').value.trim();
+      if (!raw || !code) { toast('Merci de renseigner la configuration Firebase et un code d\'équipe.'); return; }
+      let firebaseConfig;
+      try {
+        const jsonish = raw
+          .replace(/^\s*(const|var|let)\s+firebaseConfig\s*=\s*/i, '')
+          .replace(/;\s*$/, '')
+          .replace(/(['"])?([a-zA-Z0-9_]+)(['"])?\s*:/g, '"$2":')
+          .replace(/'/g, '"');
+        firebaseConfig = JSON.parse(jsonish);
+      } catch (e) {
+        toast('Configuration Firebase illisible. Colle bien le bloc complet firebaseConfig = { ... }.');
+        return;
+      }
+      saveCloudSyncConfig({ firebaseConfig, syncCode: code, enabled: true });
+      closeModal();
+      toast('Synchronisation activée, connexion en cours…');
+      await startCloudSync();
+    });
+    modal.querySelector('#syncNowBtn')?.addEventListener('click', async () => {
+      await pushCloudSyncNow();
+      toast('Synchronisation forcée.');
+    });
+    modal.querySelector('#disableSyncBtn')?.addEventListener('click', () => {
+      if (!confirm('Désactiver la synchronisation sur cet appareil ? Vos données locales restent intactes.')) return;
+      stopCloudSync();
+      clearCloudSyncConfig();
+      closeModal();
+      updateSyncButton();
+      toast('Synchronisation désactivée.');
+    });
+  });
 }
 
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
@@ -1468,6 +1654,9 @@ function openStampModal(id) {
 document.getElementById('storageBtn')?.addEventListener('click', openStorageModal);
 updateStorageButton();
 
+document.getElementById('syncBtn')?.addEventListener('click', openSyncModal);
+updateSyncButton();
+
 /* ==========================================================================
    PWA / ANDROID
    ========================================================================== */
@@ -1511,4 +1700,7 @@ if ('serviceWorker' in navigator) {
   });
 }
 
-initLocalStorageFolder().finally(() => navigate('dashboard'));
+initLocalStorageFolder().finally(() => {
+  navigate('dashboard');
+  startCloudSync();
+});

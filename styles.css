@@ -404,8 +404,8 @@ tbody tr:hover{background:var(--paper);}
 }
 @media(max-width:640px){
   body{font-size:14px;}
-  .topbar{padding-left:12px;padding-right:12px;gap:9px;}
-  .topbar__title{font-size:21px;line-height:1.15;}
+  .topbar{padding-left:12px;padding-right:12px;gap:9px;flex-wrap:wrap;}
+  .topbar__title{font-size:21px;line-height:1.15;flex:1 1 auto;min-width:0;}
   .topbar__install{padding:8px 10px;font-size:11.5px;}
   .view{padding:12px 10px calc(34px + env(safe-area-inset-bottom));}
   .card{padding:15px;margin-bottom:12px;border-radius:13px;}
