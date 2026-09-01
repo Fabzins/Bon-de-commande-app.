@@ -1,4 +1,4 @@
-const CACHE_NAME = 'bc-app-v16-android';
+const CACHE_NAME = 'bc-app-v17-android';
 const ASSETS = [
   './',
   './index.html',

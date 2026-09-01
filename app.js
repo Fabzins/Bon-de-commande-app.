@@ -283,6 +283,35 @@ function queueCloudSync() {
   cloudPushTimer = setTimeout(() => pushCloudSyncNow(), 900);
 }
 
+function parseFirebaseConfigInput(raw) {
+  if (!raw) throw new Error('Le champ est vide.');
+  // Normalise les guillemets typographiques (autocorrection du clavier/navigateur)
+  const text = raw.replace(/[\u201C\u201D]/g, '"').replace(/[\u2018\u2019]/g, "'");
+  const kwIdx = text.search(/firebaseConfig/i);
+  const braceStart = text.indexOf('{', kwIdx >= 0 ? kwIdx : 0);
+  if (braceStart === -1) throw new Error("Aucune accolade ouvrante « { » trouvée.");
+  let depth = 0, end = -1;
+  for (let i = braceStart; i < text.length; i++) {
+    if (text[i] === '{') depth++;
+    else if (text[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+  }
+  if (end === -1) throw new Error("Accolade fermante « } » manquante : le collage semble incomplet.");
+  const objLiteral = text.slice(braceStart, end + 1);
+  let obj;
+  try {
+    // Le bloc collé est du JavaScript valide (pas du JSON strict : clés non guillemetées,
+    // virgule finale possible) -> on l'évalue comme un objet plutôt que de le forcer en JSON.
+    // eslint-disable-next-line no-new-func
+    obj = new Function('return (' + objLiteral + ')')();
+  } catch (e) {
+    throw new Error('Le bloc collé ne ressemble pas à un objet JavaScript valide.');
+  }
+  if (!obj || typeof obj !== 'object' || !obj.apiKey || !obj.projectId) {
+    throw new Error("Il manque au moins « apiKey » ou « projectId » dans le bloc collé.");
+  }
+  return obj;
+}
+
 function openSyncModal() {
   const cfg = getCloudSyncConfig();
   const configured = !!(cfg && cfg.enabled);
@@ -299,7 +328,7 @@ function openSyncModal() {
     </div>
   ` : `
     <div class="card__subtitle" style="margin-bottom:16px">Colle ici la configuration de ton projet Firebase (obtenue dans la console Firebase → Paramètres du projet → Général → application web), puis choisis un code d'équipe secret à utiliser sur tous tes appareils.</div>
-    <div class="field"><label>Configuration Firebase (bloc firebaseConfig = { ... })</label><textarea id="syncConfigInput" rows="7" placeholder='const firebaseConfig = {
+    <div class="field"><label>Configuration Firebase (bloc firebaseConfig = { ... })</label><textarea id="syncConfigInput" rows="10" style="font-family:var(--font-mono);font-size:12.5px" placeholder='const firebaseConfig = {
   apiKey: "...",
   authDomain: "...",
   projectId: "...",
@@ -317,14 +346,9 @@ function openSyncModal() {
       if (!raw || !code) { toast('Merci de renseigner la configuration Firebase et un code d\'équipe.'); return; }
       let firebaseConfig;
       try {
-        const jsonish = raw
-          .replace(/^\s*(const|var|let)\s+firebaseConfig\s*=\s*/i, '')
-          .replace(/;\s*$/, '')
-          .replace(/(['"])?([a-zA-Z0-9_]+)(['"])?\s*:/g, '"$2":')
-          .replace(/'/g, '"');
-        firebaseConfig = JSON.parse(jsonish);
+        firebaseConfig = parseFirebaseConfigInput(raw);
       } catch (e) {
-        toast('Configuration Firebase illisible. Colle bien le bloc complet firebaseConfig = { ... }.');
+        toast('Configuration Firebase illisible : ' + (e.message || 'erreur inconnue') + ' Recopie le bloc firebaseConfig = { ... } en entier.');
         return;
       }
       saveCloudSyncConfig({ firebaseConfig, syncCode: code, enabled: true });
