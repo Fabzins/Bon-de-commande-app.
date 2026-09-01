@@ -169,7 +169,6 @@ async function initLocalStorageFolder() {
    configuré par l'utilisateur (voir bouton « Synchronisation »).
    ========================================================================== */
 const CLOUD_SYNC_CONFIG_KEY = 'bc_cloud_sync_config';   // { firebaseConfig, syncCode, enabled }
-const CLOUD_SYNC_LAST_PUSH_KEY = 'bc_cloud_sync_last_push_ms';
 const FIREBASE_SDK_VERSION = '10.13.2';
 
 let cloudSync = { status: 'off', error: null, lastSyncedAt: null }; // off|loading|connected|error
@@ -229,7 +228,13 @@ async function startCloudSync() {
     if (fbUnsub) fbUnsub();
     fbUnsub = docRef.onSnapshot((snap) => {
       cloudSync.status = 'connected'; cloudSync.error = null; cloudSync.lastSyncedAt = Date.now();
-      if (snap.exists) applyRemoteSnapshot(snap.data());
+      // hasPendingWrites = true uniquement pour l'écho local optimiste de notre propre
+      // écriture (avant confirmation serveur) : on l'ignore. Toute autre mise à jour
+      // confirmée par le serveur -- y compris venant d'un autre appareil -- est appliquée.
+      // (On ne compare plus des horodatages entre appareils : les horloges de deux
+      // téléphones/PC ne sont jamais parfaitement synchronisées, ce qui bloquait
+      // silencieusement et durablement la réception des mises à jour distantes.)
+      if (snap.exists && !snap.metadata.hasPendingWrites) applyRemoteSnapshot(snap.data());
       updateSyncButton();
     }, (err) => {
       cloudSync.status = 'error'; cloudSync.error = err.message || String(err); updateSyncButton();
@@ -249,9 +254,6 @@ function stopCloudSync() {
 
 function applyRemoteSnapshot(remote) {
   if (!remote || !remote.data) return;
-  const remoteMs = remote.updatedAtMs || 0;
-  const lastPush = Number(localStorage.getItem(CLOUD_SYNC_LAST_PUSH_KEY) || 0);
-  if (remoteMs <= lastPush) return; // c'est notre propre écriture qui nous revient : on ignore
   applyingRemoteSnapshot = true;
   try {
     STORAGE_DB_KEYS.forEach((key) => {
@@ -267,7 +269,6 @@ async function pushCloudSyncNow() {
   if (!cfg || !cfg.enabled || !fbDb) return;
   const snap = snapshotLocalData();
   const nowMs = Date.now();
-  localStorage.setItem(CLOUD_SYNC_LAST_PUSH_KEY, String(nowMs));
   try {
     await fbDb.collection('workspaces').doc(cfg.syncCode).set({ data: snap.data, updatedAtMs: nowMs });
     cloudSync.status = 'connected'; cloudSync.lastSyncedAt = nowMs; updateSyncButton();
