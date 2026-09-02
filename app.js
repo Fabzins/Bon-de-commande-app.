@@ -264,14 +264,51 @@ function applyRemoteSnapshot(remote) {
   navigate(state.view, state.view === 'order-form' ? { orderId: state.orderDraft?.id || null } : {});
 }
 
+// Fusionne un tableau local et un tableau distant (fournisseurs, émetteurs, produits, etc.)
+// en combinant les deux par identifiant, plutôt que d'écraser l'un par l'autre.
+// Cela évite qu'un appareil efface l'ajout d'un autre appareil fait au même moment
+// (ex. : ajout d'un émetteur sur l'Android puis, quelques secondes après, sur le PC,
+// avant que la première synchro n'ait eu le temps de se propager).
+function mergeDbArrays(localArr, remoteArr) {
+  const map = new Map();
+  (Array.isArray(remoteArr) ? remoteArr : []).forEach((item) => { if (item && item.id != null) map.set(item.id, item); });
+  // En cas de conflit sur le même identifiant (édition du même élément), la version
+  // locale la plus récente l'emporte : on l'applique en second pour qu'elle prévale.
+  (Array.isArray(localArr) ? localArr : []).forEach((item) => { if (item && item.id != null) map.set(item.id, item); });
+  return Array.from(map.values());
+}
+
 async function pushCloudSyncNow() {
   const cfg = getCloudSyncConfig();
   if (!cfg || !cfg.enabled || !fbDb) return;
-  const snap = snapshotLocalData();
-  const nowMs = Date.now();
   try {
-    await fbDb.collection('workspaces').doc(cfg.syncCode).set({ data: snap.data, updatedAtMs: nowMs });
-    cloudSync.status = 'connected'; cloudSync.lastSyncedAt = nowMs; updateSyncButton();
+    const docRef = fbDb.collection('workspaces').doc(cfg.syncCode);
+    const localSnapshot = {};
+    STORAGE_DB_KEYS.forEach((key) => { localSnapshot[key] = load(key); });
+    let merged = null;
+    // runTransaction effectue un lire-fusionner-écrire réellement atomique : si un autre
+    // appareil écrit entre notre lecture et notre écriture, Firestore relance
+    // automatiquement la transaction avec les données fraîches, au lieu d'écraser
+    // silencieusement son écriture (ce qui provoquait la perte d'un émetteur sur deux
+    // lorsque le PC et l'Android enregistraient une nouveauté à quelques instants d'écart).
+    await fbDb.runTransaction(async (tx) => {
+      const snap = await tx.get(docRef);
+      const remoteData = (snap.exists && snap.data() && snap.data().data) || {};
+      merged = {};
+      STORAGE_DB_KEYS.forEach((key) => { merged[key] = mergeDbArrays(localSnapshot[key], remoteData[key]); });
+      tx.set(docRef, { data: merged, updatedAtMs: Date.now() });
+    });
+    let changedLocally = false;
+    STORAGE_DB_KEYS.forEach((key) => { if (merged[key].length !== localSnapshot[key].length) changedLocally = true; });
+    // Applique aussi la fusion en local, au cas où l'autre appareil aurait ajouté
+    // des éléments que celui-ci n'a pas encore.
+    if (changedLocally) {
+      applyingRemoteSnapshot = true;
+      try { STORAGE_DB_KEYS.forEach((key) => localStorage.setItem(key, JSON.stringify(merged[key]))); }
+      finally { applyingRemoteSnapshot = false; }
+    }
+    cloudSync.status = 'connected'; cloudSync.lastSyncedAt = Date.now(); updateSyncButton();
+    if (changedLocally) navigate(state.view, state.view === 'order-form' ? { orderId: state.orderDraft?.id || null } : {});
   } catch (err) {
     cloudSync.status = 'error'; cloudSync.error = err.message || String(err); updateSyncButton();
   }
