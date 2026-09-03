@@ -18,7 +18,25 @@ function load(key) {
   catch (e) { return []; }
 }
 function save(key, data) {
-  localStorage.setItem(key, JSON.stringify(data));
+  const before = load(key);
+  const normalized = (Array.isArray(data) ? data : []).map(item => {
+    if (!item || typeof item !== 'object') return item;
+    return item.id != null ? item : { ...item, id: uid() };
+  });
+  // Une modification locale reçoit une version monotone. Cela permet de
+  // comparer une version locale à une version reçue depuis l'autre appareil
+  // sans écraser silencieusement une modification plus récente.
+  const beforeMap = new Map((Array.isArray(before) ? before : []).filter(x => x?.id != null).map(x => [String(x.id), x]));
+  const stamped = normalized.map(item => {
+    if (!item || typeof item !== 'object' || item.id == null) return item;
+    const prev = beforeMap.get(String(item.id));
+    if (recordSignature(prev) !== recordSignature(item)) {
+      return { ...item, _syncUpdatedAt: nextCloudClock(), _syncDeviceId: getCloudDeviceId() };
+    }
+    return item;
+  });
+  localStorage.setItem(key, JSON.stringify(stamped));
+  markCloudChanges(key, before, stamped);
   queueFolderSync();
   queueCloudSync();
 }
@@ -168,14 +186,32 @@ async function initLocalStorageFolder() {
    PC...). Nécessite une connexion internet et un projet Firebase gratuit
    configuré par l'utilisateur (voir bouton « Synchronisation »).
    ========================================================================== */
-const CLOUD_SYNC_CONFIG_KEY = 'bc_cloud_sync_config';   // { firebaseConfig, syncCode, enabled }
+const CLOUD_SYNC_CONFIG_KEY = 'bc_cloud_sync_config';
+const CLOUD_PENDING_KEY = 'bc_cloud_pending_v3';
+const CLOUD_DEVICE_KEY = 'bc_cloud_device_id';
+const CLOUD_CLOCK_KEY = 'bc_cloud_logical_clock';
 const FIREBASE_SDK_VERSION = '10.13.2';
+const CLOUD_SCHEMA_VERSION = 3;
 
-let cloudSync = { status: 'off', error: null, lastSyncedAt: null }; // off|loading|connected|error
-let fbApp = null, fbDb = null, fbUnsub = null;
+// Projet Firebase de l'application. La configuration Web Firebase n'est pas
+// une clé privée ; la sécurité des données repose sur Authentication +
+// les règles Firestore. Le code d'équipe reste utilisé comme identifiant
+// de l'espace de travail partagé entre Android et PC.
+const DEFAULT_FIREBASE_CONFIG = {
+  apiKey: "AIzaSyAu6ZBROVcvb1v_M_LqHLDtQWBs53A-dA",
+  authDomain: "bon-de-commande-36c47.firebaseapp.com",
+  projectId: "bon-de-commande-36c47",
+  storageBucket: "bon-de-commande-36c47.firebasestorage.app",
+  messagingSenderId: "476598629619",
+  appId: "1:476598629619:web:b6d267e901f943060ab386"
+};
+
+let cloudSync = { status: 'off', error: null, lastSyncedAt: null };
+let fbApp = null, fbDb = null, fbUnsubscribers = [];
 let cloudPushTimer = null;
 let applyingRemoteSnapshot = false;
 let firebaseScriptsPromise = null;
+let cloudInitialSyncDone = false;
 
 function getCloudSyncConfig() {
   try { return JSON.parse(localStorage.getItem(CLOUD_SYNC_CONFIG_KEY)) || null; }
@@ -183,6 +219,67 @@ function getCloudSyncConfig() {
 }
 function saveCloudSyncConfig(cfg) { localStorage.setItem(CLOUD_SYNC_CONFIG_KEY, JSON.stringify(cfg)); }
 function clearCloudSyncConfig() { localStorage.removeItem(CLOUD_SYNC_CONFIG_KEY); }
+
+function getCloudDeviceId() {
+  let id = localStorage.getItem(CLOUD_DEVICE_KEY);
+  if (!id) {
+    id = 'dev_' + uid();
+    localStorage.setItem(CLOUD_DEVICE_KEY, id);
+  }
+  return id;
+}
+
+function getCloudClock() {
+  const n = Number(localStorage.getItem(CLOUD_CLOCK_KEY) || 0);
+  return Number.isFinite(n) ? n : 0;
+}
+function nextCloudClock(remoteTime = 0) {
+  const next = Math.max(Date.now(), getCloudClock() + 1, Number(remoteTime) || 0);
+  localStorage.setItem(CLOUD_CLOCK_KEY, String(next));
+  return next;
+}
+function observeCloudClock(remoteTime) {
+  if (Number.isFinite(Number(remoteTime))) nextCloudClock(Number(remoteTime));
+}
+
+function getCloudPending() {
+  try { return JSON.parse(localStorage.getItem(CLOUD_PENDING_KEY)) || {}; }
+  catch (_) { return {}; }
+}
+function saveCloudPending(pending) { localStorage.setItem(CLOUD_PENDING_KEY, JSON.stringify(pending)); }
+function pendingKey(collection, id) { return `${collection}::${id}`; }
+
+function recordSignature(item) {
+  try { return JSON.stringify(item); } catch (_) { return String(item); }
+}
+
+/*
+ * Chaque modification locale est placée dans une petite file persistante.
+ * Contrairement à l'ancienne V19, une synchronisation distante ne peut donc
+ * pas écraser une modification locale qui attend encore son envoi.
+ */
+function markCloudChanges(key, before, after) {
+  if (applyingRemoteSnapshot) return;
+  const pending = getCloudPending();
+  const oldMap = new Map((Array.isArray(before) ? before : []).filter(x => x?.id != null).map(x => [String(x.id), x]));
+  const newMap = new Map((Array.isArray(after) ? after : []).filter(x => x?.id != null).map(x => [String(x.id), x]));
+  const ids = new Set([...oldMap.keys(), ...newMap.keys()]);
+
+  ids.forEach(id => {
+    const oldItem = oldMap.get(id);
+    const newItem = newMap.get(id);
+    if (recordSignature(oldItem) === recordSignature(newItem)) return;
+    const pk = pendingKey(key, id);
+    pending[pk] = {
+      collection: key,
+      id,
+      deleted: !newItem,
+      data: newItem || null,
+      deviceId: getCloudDeviceId()
+    };
+  });
+  saveCloudPending(pending);
+}
 
 function loadFirebaseScripts() {
   if (firebaseScriptsPromise) return firebaseScriptsPromise;
@@ -213,102 +310,221 @@ function updateSyncButton() {
     cloudSync.lastSyncedAt ? ('Dernière synchro : ' + new Date(cloudSync.lastSyncedAt).toLocaleTimeString('fr-FR')) : '';
 }
 
+function applyRemoteRecord(collection, remote) {
+  if (!remote || remote.id == null) return false;
+  const id = String(remote.id);
+  const remoteVersion = Number(remote._syncUpdatedAt || 0);
+  const remoteDevice = String(remote._syncDeviceId || remote._deviceId || 'remote');
+  observeCloudClock(remoteVersion);
+
+  const pending = getCloudPending();
+  const pk = pendingKey(collection, id);
+  // Une modification locale non encore confirmée par le cloud reste prioritaire.
+  if (pending[pk]) return false;
+
+  const current = load(collection);
+  const idx = current.findIndex(x => x && String(x.id) === id);
+  const local = idx === -1 ? null : current[idx];
+  const localVersion = Number(local?._syncUpdatedAt || 0);
+  const localDevice = String(local?._syncDeviceId || '');
+
+  // Le dernier changement logique gagne. En cas d'égalité, le deviceId
+  // fournit un ordre déterministe. Si le local est plus récent, on le remet
+  // en file d'envoi plutôt que de l'écraser.
+  if (local && (localVersion > remoteVersion || (localVersion === remoteVersion && localDevice && localDevice > remoteDevice))) {
+    const pendingNow = getCloudPending();
+    pendingNow[pk] = { collection, id, deleted: false, data: local, deviceId: getCloudDeviceId(), queuedAt: Date.now() };
+    saveCloudPending(pendingNow);
+    queueCloudSync();
+    return false;
+  }
+
+  let changed = false;
+  applyingRemoteSnapshot = true;
+  try {
+    if (remote._deleted) {
+      if (idx !== -1) { current.splice(idx, 1); changed = true; }
+    } else {
+      const clean = { ...remote };
+      delete clean._deleted;
+      delete clean._deviceId;
+      delete clean._serverUpdatedAt;
+      if (idx === -1) { current.push(clean); changed = true; }
+      else if (recordSignature(current[idx]) !== recordSignature(clean)) { current[idx] = clean; changed = true; }
+    }
+    if (changed) localStorage.setItem(collection, JSON.stringify(current));
+  } finally { applyingRemoteSnapshot = false; }
+  if (changed) queueFolderSync();
+  return changed;
+}
+
+async function migrateLegacyWorkspace(docRef) {
+  const snap = await docRef.get();
+  if (!snap.exists) return;
+  const root = snap.data() || {};
+  if (Number(root.schemaVersion || 1) >= CLOUD_SCHEMA_VERSION) return;
+  const legacy = root.data || {};
+  let batch = fbDb.batch();
+  let writes = 0;
+  for (const key of STORAGE_DB_KEYS) {
+    const arr = Array.isArray(legacy[key]) ? legacy[key] : [];
+    for (const item of arr) {
+      if (!item || item.id == null) continue;
+      const ref = docRef.collection(key).doc(String(item.id));
+      batch.set(ref, {
+        ...item,
+        _deleted: false,
+        _syncUpdatedAt: Number(item._syncUpdatedAt || Date.now()),
+        _syncDeviceId: String(item._syncDeviceId || 'legacy-v1'),
+        _deviceId: 'legacy-v1',
+        _migratedAt: firebase.firestore.FieldValue.serverTimestamp()
+      }, { merge: false });
+      writes++;
+      if (writes >= 450) {
+        await batch.commit();
+        batch = fbDb.batch();
+        writes = 0;
+      }
+    }
+  }
+  if (writes) await batch.commit();
+  await docRef.set({ schemaVersion: CLOUD_SCHEMA_VERSION, migratedAt: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true });
+}
+
+
+function subscribeCloudCollection(docRef, key) {
+  return docRef.collection(key).onSnapshot((snap) => {
+    let changed = false;
+    const remoteIds = new Set();
+
+    snap.docChanges().forEach(change => {
+      const id = String(change.doc.id);
+      remoteIds.add(id);
+      if (change.type === 'added' || change.type === 'modified' || change.type === 'removed') {
+        const data = change.doc.data() || {};
+        const remote = { ...data, id };
+        if (change.type === 'removed') remote._deleted = true;
+        changed = applyRemoteRecord(key, remote) || changed;
+      }
+    });
+
+    // Sur la première photo (et lors d'une reconnexion), les éléments locaux
+    // absents du cloud doivent être envoyés. Cela évite un second .get()
+    // complet de chaque collection et économise des lectures Firestore.
+    const pending = getCloudPending();
+    const local = load(key);
+    local.forEach(item => {
+      if (!item?.id) return;
+      const id = String(item.id);
+      const pk = pendingKey(key, id);
+      if (!remoteIds.has(id) && !pending[pk]) {
+        pending[pk] = {
+          collection: key, id, deleted: false, data: item,
+          deviceId: getCloudDeviceId(), queuedAt: Date.now()
+        };
+      }
+    });
+    saveCloudPending(pending);
+    if (Object.keys(pending).length) queueCloudSync();
+
+    cloudSync.status = 'connected';
+    cloudSync.error = null;
+    cloudSync.lastSyncedAt = Date.now();
+    updateSyncButton();
+    if (changed && cloudInitialSyncDone) {
+      toast('Données mises à jour depuis un autre appareil.');
+      navigate(state.view, state.view === 'order-form' ? { orderId: state.orderDraft?.id || null } : {});
+    }
+  }, (err) => {
+    cloudSync.status = 'error';
+    cloudSync.error = err.message || String(err);
+    updateSyncButton();
+  });
+}
+
 async function startCloudSync() {
   const cfg = getCloudSyncConfig();
   if (!cfg || !cfg.enabled || !cfg.firebaseConfig || !cfg.syncCode) return;
   cloudSync.status = 'loading'; cloudSync.error = null; updateSyncButton();
   try {
     await loadFirebaseScripts();
-    if (!fbApp) {
-      fbApp = firebase.apps && firebase.apps.length ? firebase.app() : firebase.initializeApp(cfg.firebaseConfig);
-      await firebase.auth().signInAnonymously();
-    }
+    if (!fbApp) fbApp = firebase.apps?.length ? firebase.app() : firebase.initializeApp(cfg.firebaseConfig);
+    if (!firebase.auth().currentUser) await firebase.auth().signInAnonymously();
     fbDb = firebase.firestore();
     const docRef = fbDb.collection('workspaces').doc(cfg.syncCode);
-    if (fbUnsub) fbUnsub();
-    fbUnsub = docRef.onSnapshot((snap) => {
-      cloudSync.status = 'connected'; cloudSync.error = null; cloudSync.lastSyncedAt = Date.now();
-      // hasPendingWrites = true uniquement pour l'écho local optimiste de notre propre
-      // écriture (avant confirmation serveur) : on l'ignore. Toute autre mise à jour
-      // confirmée par le serveur -- y compris venant d'un autre appareil -- est appliquée.
-      // (On ne compare plus des horodatages entre appareils : les horloges de deux
-      // téléphones/PC ne sont jamais parfaitement synchronisées, ce qui bloquait
-      // silencieusement et durablement la réception des mises à jour distantes.)
-      if (snap.exists && !snap.metadata.hasPendingWrites) applyRemoteSnapshot(snap.data());
-      updateSyncButton();
-    }, (err) => {
-      cloudSync.status = 'error'; cloudSync.error = err.message || String(err); updateSyncButton();
-    });
-    const existing = await docRef.get();
-    if (!existing.exists) await pushCloudSyncNow();
+
+    await migrateLegacyWorkspace(docRef);
+    await docRef.set({ schemaVersion: CLOUD_SCHEMA_VERSION, lastAppVersion: 'V20' }, { merge: true });
+    fbUnsubscribers.forEach(fn => { try { fn(); } catch (_) {} });
+    fbUnsubscribers = STORAGE_DB_KEYS.map(key => subscribeCloudCollection(docRef, key));
+    cloudInitialSyncDone = true;
+    await pushCloudSyncNow();
   } catch (err) {
     cloudSync.status = 'error'; cloudSync.error = err.message || String(err); updateSyncButton();
   }
 }
 
 function stopCloudSync() {
-  if (fbUnsub) { fbUnsub(); fbUnsub = null; }
+  clearTimeout(cloudPushTimer);
+  fbUnsubscribers.forEach(fn => { try { fn(); } catch (_) {} });
+  fbUnsubscribers = [];
+  cloudInitialSyncDone = false;
   cloudSync = { status: 'off', error: null, lastSyncedAt: null };
   updateSyncButton();
-}
-
-function applyRemoteSnapshot(remote) {
-  if (!remote || !remote.data) return;
-  applyingRemoteSnapshot = true;
-  try {
-    STORAGE_DB_KEYS.forEach((key) => {
-      if (remote.data[key] !== undefined) localStorage.setItem(key, JSON.stringify(remote.data[key]));
-    });
-  } finally { applyingRemoteSnapshot = false; }
-  toast('Données mises à jour depuis un autre appareil.');
-  navigate(state.view, state.view === 'order-form' ? { orderId: state.orderDraft?.id || null } : {});
-}
-
-// Fusionne un tableau local et un tableau distant (fournisseurs, émetteurs, produits, etc.)
-// en combinant les deux par identifiant, plutôt que d'écraser l'un par l'autre.
-// Cela évite qu'un appareil efface l'ajout d'un autre appareil fait au même moment
-// (ex. : ajout d'un émetteur sur l'Android puis, quelques secondes après, sur le PC,
-// avant que la première synchro n'ait eu le temps de se propager).
-function mergeDbArrays(localArr, remoteArr) {
-  const map = new Map();
-  (Array.isArray(remoteArr) ? remoteArr : []).forEach((item) => { if (item && item.id != null) map.set(item.id, item); });
-  // En cas de conflit sur le même identifiant (édition du même élément), la version
-  // locale la plus récente l'emporte : on l'applique en second pour qu'elle prévale.
-  (Array.isArray(localArr) ? localArr : []).forEach((item) => { if (item && item.id != null) map.set(item.id, item); });
-  return Array.from(map.values());
 }
 
 async function pushCloudSyncNow() {
   const cfg = getCloudSyncConfig();
   if (!cfg || !cfg.enabled || !fbDb) return;
-  try {
-    const docRef = fbDb.collection('workspaces').doc(cfg.syncCode);
-    const localSnapshot = {};
-    STORAGE_DB_KEYS.forEach((key) => { localSnapshot[key] = load(key); });
-    let merged = null;
-    // runTransaction effectue un lire-fusionner-écrire réellement atomique : si un autre
-    // appareil écrit entre notre lecture et notre écriture, Firestore relance
-    // automatiquement la transaction avec les données fraîches, au lieu d'écraser
-    // silencieusement son écriture (ce qui provoquait la perte d'un émetteur sur deux
-    // lorsque le PC et l'Android enregistraient une nouveauté à quelques instants d'écart).
-    await fbDb.runTransaction(async (tx) => {
-      const snap = await tx.get(docRef);
-      const remoteData = (snap.exists && snap.data() && snap.data().data) || {};
-      merged = {};
-      STORAGE_DB_KEYS.forEach((key) => { merged[key] = mergeDbArrays(localSnapshot[key], remoteData[key]); });
-      tx.set(docRef, { data: merged, updatedAtMs: Date.now() });
-    });
-    let changedLocally = false;
-    STORAGE_DB_KEYS.forEach((key) => { if (merged[key].length !== localSnapshot[key].length) changedLocally = true; });
-    // Applique aussi la fusion en local, au cas où l'autre appareil aurait ajouté
-    // des éléments que celui-ci n'a pas encore.
-    if (changedLocally) {
-      applyingRemoteSnapshot = true;
-      try { STORAGE_DB_KEYS.forEach((key) => localStorage.setItem(key, JSON.stringify(merged[key]))); }
-      finally { applyingRemoteSnapshot = false; }
-    }
+  const pending = getCloudPending();
+  const entries = Object.values(pending);
+  if (!entries.length) {
     cloudSync.status = 'connected'; cloudSync.lastSyncedAt = Date.now(); updateSyncButton();
-    if (changedLocally) navigate(state.view, state.view === 'order-form' ? { orderId: state.orderDraft?.id || null } : {});
+    return;
+  }
+  try {
+    const workspaceRef = fbDb.collection('workspaces').doc(cfg.syncCode);
+    const captured = entries.map(p => ({ ...p, data: p.deleted ? null : (p.data || load(p.collection).find(x => String(x.id) === String(p.id)) || null) }));
+    const writes = captured.filter(p => p.deleted || p.data);
+
+    // Firestore limite un batch à 500 écritures. 450 laisse une marge pour les métadonnées.
+    for (let i = 0; i < writes.length; i += 450) {
+      const batch = fbDb.batch();
+      writes.slice(i, i + 450).forEach(p => {
+        const ref = workspaceRef.collection(p.collection).doc(String(p.id));
+        if (p.deleted) {
+          batch.set(ref, {
+            id: String(p.id),
+            _deleted: true,
+            _syncUpdatedAt: Number(p.data?._syncUpdatedAt || p.queuedAt || Date.now()),
+            _syncDeviceId: String(p.deviceId || getCloudDeviceId()),
+            _deviceId: getCloudDeviceId(),
+            _serverUpdatedAt: firebase.firestore.FieldValue.serverTimestamp()
+          }, { merge: true });
+        } else {
+          batch.set(ref, {
+            ...p.data,
+            id: String(p.id),
+            _deleted: false,
+            _syncUpdatedAt: Number(p.data?._syncUpdatedAt || p.queuedAt || Date.now()),
+            _syncDeviceId: String(p.data?._syncDeviceId || p.deviceId || getCloudDeviceId()),
+            _deviceId: getCloudDeviceId(),
+            _serverUpdatedAt: firebase.firestore.FieldValue.serverTimestamp()
+          }, { merge: false });
+        }
+      });
+      await batch.commit();
+    }
+
+    const latest = getCloudPending();
+    writes.forEach(p => {
+      const pk = pendingKey(p.collection, p.id);
+      const current = latest[pk];
+      const currentData = current?.deleted ? null : current?.data;
+      if (current && current.deleted === p.deleted && recordSignature(currentData) === recordSignature(p.data)) delete latest[pk];
+    });
+    saveCloudPending(latest);
+    cloudSync.status = 'connected'; cloudSync.error = null; cloudSync.lastSyncedAt = Date.now(); updateSyncButton();
   } catch (err) {
     cloudSync.status = 'error'; cloudSync.error = err.message || String(err); updateSyncButton();
   }
@@ -365,31 +581,18 @@ function openSyncModal() {
       <button type="button" class="btn btn-danger" id="disableSyncBtn">Désactiver</button>
     </div>
   ` : `
-    <div class="card__subtitle" style="margin-bottom:16px">Colle ici la configuration de ton projet Firebase (obtenue dans la console Firebase → Paramètres du projet → Général → application web), puis choisis un code d'équipe secret à utiliser sur tous tes appareils.</div>
-    <div class="field"><label>Configuration Firebase (bloc firebaseConfig = { ... })</label><textarea id="syncConfigInput" rows="10" style="font-family:var(--font-mono);font-size:12.5px" placeholder='const firebaseConfig = {
-  apiKey: "...",
-  authDomain: "...",
-  projectId: "...",
-  ...
-};'></textarea></div>
-    <div class="field"><label>Code d'équipe</label><input id="syncCodeInput" type="text" placeholder="Choisis un code secret, ex. hydrodis-benin-2026"><small>Utilise EXACTEMENT le même code sur tous les appareils à synchroniser. Garde-le confidentiel : toute personne qui le connaît (et a accès à ta config) peut voir tes données.</small></div>
+    <div class="card__subtitle" style="margin-bottom:16px">Firebase est déjà configuré dans cette version. Il suffit de choisir le même code de synchronisation sur ton Android et ton PC. Les données locales restent disponibles même si Firebase ou Internet est indisponible.</div>
+    <div class="field"><label>Projet Firebase</label><div class="input-like" style="padding:10px 12px;border:1px solid var(--paper-line);border-radius:8px;background:var(--paper);font-family:var(--font-mono)">${escapeHtml(DEFAULT_FIREBASE_CONFIG.projectId)}</div></div>
+    <div class="field"><label>Code de synchronisation</label><input id="syncCodeInput" type="text" placeholder="Ex. BDC-FABRICE-2026" autocomplete="off"><small>Utilise EXACTEMENT le même code sur Android et sur PC. Choisis un code suffisamment difficile à deviner et ne le partage pas.</small></div>
     <div class="modal__actions">
       <button type="button" class="btn btn-ghost" data-close-modal>Annuler</button>
       <button type="button" class="btn btn-primary" id="enableSyncBtn">Activer la synchronisation</button>
     </div>
   `, (modal) => {
     modal.querySelector('#enableSyncBtn')?.addEventListener('click', async () => {
-      const raw = modal.querySelector('#syncConfigInput').value.trim();
       const code = modal.querySelector('#syncCodeInput').value.trim();
-      if (!raw || !code) { toast('Merci de renseigner la configuration Firebase et un code d\'équipe.'); return; }
-      let firebaseConfig;
-      try {
-        firebaseConfig = parseFirebaseConfigInput(raw);
-      } catch (e) {
-        toast('Configuration Firebase illisible : ' + (e.message || 'erreur inconnue') + ' Recopie le bloc firebaseConfig = { ... } en entier.');
-        return;
-      }
-      saveCloudSyncConfig({ firebaseConfig, syncCode: code, enabled: true });
+      if (!code) { toast('Merci de renseigner un code de synchronisation.'); return; }
+      saveCloudSyncConfig({ firebaseConfig: DEFAULT_FIREBASE_CONFIG, syncCode: code, enabled: true });
       closeModal();
       toast('Synchronisation activée, connexion en cours…');
       await startCloudSync();
