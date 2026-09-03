@@ -198,7 +198,7 @@ const CLOUD_SCHEMA_VERSION = 3;
 // les règles Firestore. Le code d'équipe reste utilisé comme identifiant
 // de l'espace de travail partagé entre Android et PC.
 const DEFAULT_FIREBASE_CONFIG = {
-  apiKey: "AIzaSyAu6ZBROVcvb1v_M_LqHLDtQWBs53A-dA",
+  apiKey: "AIzaSyAu6ZBROVcvb1v_M_LqHLDtQWBs53_A-dA",
   authDomain: "bon-de-commande-36c47.firebaseapp.com",
   projectId: "bon-de-commande-36c47",
   storageBucket: "bon-de-commande-36c47.firebasestorage.app",
@@ -1262,7 +1262,6 @@ function openHeaderModal(id) {
       const name = String(modal.querySelector('#newTitleName')?.value || '').trim();
       if (!name) { toast('Saisissez le titre de signature.'); return; }
       const list = load(DB.signatureTitles);
-      if (list.some(t => t.name.toLowerCase() === name.toLowerCase())) { toast('Ce titre existe déjà.'); return; }
       const item = { id: uid(), name };
       list.push(item); save(DB.signatureTitles, list);
       const option = document.createElement('option'); option.value = item.id; option.textContent = item.name; titleSelect.appendChild(option); titleSelect.value = item.id;
@@ -1282,7 +1281,6 @@ function openHeaderModal(id) {
       const reader = new FileReader();
       reader.onload = () => {
         const list = load(DB.stamps);
-        if (list.some(st => st.name.toLowerCase() === name.toLowerCase())) { toast('Ce cachet existe déjà.'); return; }
         const item = { id: uid(), name, image: reader.result };
         list.push(item); save(DB.stamps, list);
         const option = document.createElement('option'); option.value = item.id; option.textContent = item.name; stampSelect.appendChild(option); stampSelect.value = item.id;
@@ -1321,7 +1319,6 @@ function openSignatureTitleModal(id) {
   `, modal => {
     modal.querySelector('#signatureTitleForm').addEventListener('submit', e => {
       e.preventDefault(); const fd = new FormData(e.target), name = String(fd.get('name') || '').trim(); if (!name) return; const list = load(DB.signatureTitles);
-      if (list.some(t => t.id !== existing?.id && t.name.toLowerCase() === name.toLowerCase())) { toast('Ce titre existe déjà.'); return; }
       const payload = { name };
       if (existing) { const idx = list.findIndex(t => t.id === existing.id); list[idx] = { ...existing, ...payload }; } else list.push({ id: uid(), ...payload });
       save(DB.signatureTitles, list); closeModal(); renderHeaders(); toast(existing ? 'Titre modifié.' : 'Titre ajouté.');
