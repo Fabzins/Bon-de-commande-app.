@@ -853,19 +853,18 @@ function renderSuppliers() {
       <div class="card__head">
         <div>
           <h2 class="card__title">Fournisseurs</h2>
-          <div class="card__subtitle">Le code de chaque fournisseur sert à générer le numéro de ses bons</div>
+          <div class="card__subtitle">Le code de chaque fournisseur sert de référence interne</div>
         </div>
         <button class="btn btn-brass" id="addSupplier">+ Ajouter un fournisseur</button>
       </div>
       ${suppliers.length ? `<div class="table-wrap"><table>
-        <thead><tr><th>Code</th><th>Fournisseur</th><th>Contact</th><th>Prochain n°</th><th></th></tr></thead>
+        <thead><tr><th>Code</th><th>Fournisseur</th><th>Contact</th><th></th></tr></thead>
         <tbody>
           ${suppliers.map((s) => `
             <tr>
               <td><span class="chip-code">${escapeHtml(s.code)}</span></td>
               <td><strong>${escapeHtml(s.name)}</strong><div class="text-muted" style="font-size:12px">${escapeHtml(s.address || '')}</div></td>
               <td>${escapeHtml(s.phone || '—')}<div class="text-muted" style="font-size:12px">${escapeHtml(s.email || '')}</div></td>
-              <td class="num">${String(s.nextSeq).padStart(4, '0')}</td>
               <td class="row-actions">
                 <button class="btn btn-ghost btn-sm" data-edit-supplier="${s.id}">Modifier</button>
                 <button class="btn btn-danger btn-sm" data-del-supplier="${s.id}">Supprimer</button>
@@ -902,7 +901,7 @@ function openSupplierModal(id) {
     <form id="supplierForm">
       <div class="field"><label>Nom du fournisseur *</label><input name="name" required value="${escapeHtml(existing?.name || '')}"></div>
       <div class="field-row">
-        <div class="field"><label>Code (numérotation)</label><input name="code" maxlength="8" value="${escapeHtml(existing?.code || '')}"><small>Laisser vide pour génération automatique</small></div>
+        <div class="field"><label>Code (référence interne)</label><input name="code" maxlength="8" value="${escapeHtml(existing?.code || '')}"><small>Laisser vide pour génération automatique</small></div>
         <div class="field"><label>Téléphone</label><input name="phone" value="${escapeHtml(existing?.phone || '')}"></div>
       </div>
       <div class="field"><label>Adresse</label><input name="address" value="${escapeHtml(existing?.address || '')}"></div>
@@ -1139,11 +1138,13 @@ function renderHeaders() {
         ${headers.map(h => {
           const title = getHeaderSignatureTitle(h, titles);
           const stamp = getHeaderSignatureStamp(h, stamps);
+          const nextNumber = getNextOrderNumber(h.id) || '—';
           return `<div class="pick-card">
             <div class="pick-card__name">${escapeHtml(h.name)}</div>
             <div class="pick-card__meta">${escapeHtml(h.address || '')}</div>
             <div class="pick-card__meta">${escapeHtml(h.phone || '')} ${h.email ? '· ' + escapeHtml(h.email) : ''}</div>
             <div class="pick-card__meta">${h.rccm ? 'RCCM ' + escapeHtml(h.rccm) : ''} ${h.ifu ? '· IFU ' + escapeHtml(h.ifu) : ''}</div>
+            <div class="pick-card__meta">Prochain n° de bon : <strong class="num">${nextNumber}</strong></div>
             <div class="pick-card__signature"><span>Titre : <strong>${escapeHtml(title?.name || 'Aucun')}</strong></span><span>Cachet : <strong>${escapeHtml(stamp?.name || 'Aucun')}</strong></span></div>
             <div class="row-actions" style="margin-top:10px"><button class="btn btn-ghost btn-sm" data-edit-header="${h.id}">Modifier</button><button class="btn btn-danger btn-sm" data-del-header="${h.id}">Supprimer</button></div>
           </div>`;
@@ -1342,21 +1343,26 @@ function normalizeOrderNumber(value) {
   return String(n).padStart(4, '0');
 }
 
-function getNextOrderNumber(supplierId, orders = load(DB.orders), suppliers = load(DB.suppliers)) {
-  if (!supplierId) return null;
-  const supplier = suppliers.find((s) => s.id === supplierId);
-  const supplierNextSeq = supplier ? (Number(supplier.nextSeq) || 1) : 1;
-  const maxSupplierNumber = orders.reduce((max, order) => {
-    if (order.supplierId !== supplierId) return max;
+function getNextOrderNumber(headerId, orders = load(DB.orders)) {
+  if (!headerId) return null;
+  // Le numéro « suivant » n'est plus stocké dans un compteur qui ne fait
+  // qu'augmenter : il est recalculé à partir des bons de CET ÉMETTEUR qui
+  // existent encore. Ainsi, si le bon le plus récent est supprimé, son
+  // numéro redevient disponible pour le prochain bon (il est traité comme
+  // annulé plutôt que définitivement consommé). Un bon supprimé au milieu
+  // de la chronologie laisse en revanche un trou, comme sur un carnet
+  // papier, puisque des numéros plus élevés existent déjà.
+  const maxExistingNumber = orders.reduce((max, order) => {
+    if (order.headerId !== headerId) return max;
     const n = parseInt(String(order.number ?? '').replace(/\D/g, ''), 10);
     return Number.isFinite(n) ? Math.max(max, n) : max;
   }, 0);
-  const next = Math.max(supplierNextSeq, maxSupplierNumber + 1);
+  const next = maxExistingNumber + 1;
   return next <= 9999 ? String(next).padStart(4, '0') : null;
 }
 
-function buildOrderNumber(supplierId) {
-  return getNextOrderNumber(supplierId);
+function buildOrderNumber(headerId) {
+  return getNextOrderNumber(headerId);
 }
 
 function renderOrderForm(orderId) {
@@ -1387,7 +1393,7 @@ function renderOrderForm(orderId) {
 
   const supplier = suppliers.find((s) => s.id === draft.supplierId);
   const ordersForNumbering = load(DB.orders);
-  const previewNumber = draft.number || getNextOrderNumber(draft.supplierId, ordersForNumbering, suppliers);
+  const previewNumber = draft.number || getNextOrderNumber(draft.headerId, ordersForNumbering);
   const selectedHeader = headers.find(h => h.id === draft.headerId);
   const selectedTitle = getOrderSignatureTitle(draft, selectedHeader, signatureTitles);
   const selectedStamp = getOrderSignatureStamp(draft, selectedHeader, signatureStamps);
@@ -1643,24 +1649,21 @@ function persistOrder(alsoExport) {
       numberInput?.focus();
       return;
     }
-    const nextAutomaticNumber = getNextOrderNumber(draft.supplierId, orders, suppliers);
+    const nextAutomaticNumber = getNextOrderNumber(draft.headerId, orders);
     if (!normalizedNumber && !nextAutomaticNumber) {
       toast('La numérotation automatique a atteint 9999. Saisissez un numéro disponible entre 0001 et 9999.');
       numberInput?.focus();
       return;
     }
     draft.number = normalizedNumber || nextAutomaticNumber;
-    const duplicate = orders.some(o => o.supplierId === draft.supplierId && normalizeOrderNumber(o.number) === draft.number);
+    const duplicate = orders.some(o => o.headerId === draft.headerId && normalizeOrderNumber(o.number) === draft.number);
     if (duplicate) {
-      toast(`Le numéro ${draft.number} est déjà utilisé. Choisissez un autre numéro.`);
+      toast(`Le numéro ${draft.number} est déjà utilisé pour cet émetteur. Choisissez un autre numéro.`);
       numberInput?.focus();
       return;
     }
     draft.id = uid();
     draft.createdAt = Date.now();
-    const supplier = suppliers.find((s) => s.id === draft.supplierId);
-    if (supplier) supplier.nextSeq = Math.max(Number(supplier.nextSeq) || 1, parseInt(draft.number, 10) + 1);
-    save(DB.suppliers, suppliers);
     orders.push({ ...draft, total });
   } else {
     const idx = orders.findIndex((o) => o.id === draft.id);
@@ -1862,7 +1865,7 @@ function previewOrderPdf() {
   const draft = JSON.parse(JSON.stringify(state.orderDraft || {}));
   if (!validateOrder(draft)) return;
   if (!draft.number) {
-    const n = getNextOrderNumber(draft.supplierId, load(DB.orders), load(DB.suppliers));
+    const n = getNextOrderNumber(draft.headerId, load(DB.orders));
     if (n) draft.number = n;
   }
   draft.total = draft.items.reduce((s, it) => s + it.qty * it.unitPrice, 0);
