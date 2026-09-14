@@ -336,7 +336,7 @@ tbody tr:hover{background:var(--paper);}
 /* ===== Nouvelles fonctions : adresses, paiements, unités, cachets ===== */
 .field-inline{display:flex;gap:8px;align-items:center;}
 .field-inline select,.field-inline input{flex:1;}
-.payment-editor input{width:100%;padding:7px 9px;font-size:13px;border:1px solid var(--paper-line);border-radius:7px;}
+.payment-editor input,.payment-editor select{width:100%;padding:7px 9px;font-size:13px;border:1px solid var(--paper-line);border-radius:7px;}
 .payment-total td{border-top:2px solid var(--paper-line);font-weight:700;background:var(--paper);}
 .payment-balance{display:flex;justify-content:space-between;align-items:center;margin-top:12px;padding:12px 14px;border:1px solid var(--paper-line);border-radius:9px;background:var(--paper);font-size:13px;}
 .payment-balance strong{font-family:var(--font-mono);font-size:16px;}

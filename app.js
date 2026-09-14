@@ -684,6 +684,8 @@ function escapeHtml(s) {
 let state = {
   view: 'dashboard',
   orderDraft: null,   // bon en cours de création/édition
+  dashboardSupplierFilter: '',
+  dashboardEmitterFilter: '',
   historyFilter: '',
   historyEmitterFilter: '',
 };
@@ -765,10 +767,24 @@ document.getElementById('menuToggle').addEventListener('click', () => {
    ========================================================================== */
 function renderDashboard() {
   const suppliers = load(DB.suppliers);
-  const orders = load(DB.orders);
+  const headers = load(DB.headers);
+  let orders = load(DB.orders);
   const products = load(DB.products);
+  if (state.dashboardSupplierFilter) orders = orders.filter((o) => o.supplierId === state.dashboardSupplierFilter);
+  if (state.dashboardEmitterFilter) orders = orders.filter((o) => o.headerId === state.dashboardEmitterFilter);
   const total = orders.reduce((s, o) => s + (o.total || 0), 0);
   const recent = [...orders].sort((a, b) => b.createdAt - a.createdAt).slice(0, 6);
+  const filterHtml = `
+    <div class="filter-row">
+      <select id="dashboardSupplierFilter" aria-label="Filtrer par fournisseur">
+        <option value="">Tous les fournisseurs</option>
+        ${suppliers.map((s) => `<option value="${s.id}" ${state.dashboardSupplierFilter === s.id ? 'selected' : ''}>${escapeHtml(s.name)}</option>`).join('')}
+      </select>
+      <select id="dashboardEmitterFilter" aria-label="Filtrer par émetteur">
+        <option value="">Tous les émetteurs</option>
+        ${headers.map((h) => `<option value="${h.id}" ${state.dashboardEmitterFilter === h.id ? 'selected' : ''}>${escapeHtml(h.name)}</option>`).join('')}
+      </select>
+    </div>`;
 
   const view = document.getElementById('view');
   view.innerHTML = `
@@ -783,14 +799,23 @@ function renderDashboard() {
       <div class="card__head">
         <div>
           <h2 class="card__title">Derniers bons de commande</h2>
-          <div class="card__subtitle">Les 6 bons les plus récents, tous fournisseurs confondus</div>
+          <div class="card__subtitle">Filtrez par fournisseur ou par émetteur pour mettre à jour les indicateurs et les 6 derniers bons</div>
         </div>
         <button class="btn btn-brass" id="goNewOrder">+ Nouveau bon</button>
       </div>
+      ${filterHtml}
       ${recent.length ? renderOrdersTable(recent, suppliers) : emptyState('Aucun bon pour le moment', 'Créez votre premier bon de commande pour le voir apparaître ici.')}
     </div>
   `;
   document.getElementById('goNewOrder').addEventListener('click', () => { state.orderDraft = null; navigate('order-form'); });
+  document.getElementById('dashboardSupplierFilter').addEventListener('change', (e) => {
+    state.dashboardSupplierFilter = e.target.value;
+    renderDashboard();
+  });
+  document.getElementById('dashboardEmitterFilter').addEventListener('change', (e) => {
+    state.dashboardEmitterFilter = e.target.value;
+    renderDashboard();
+  });
   bindOrdersTableActions();
 
   if (suppliers.length === 0) {
@@ -1330,6 +1355,14 @@ function openSignatureTitleModal(id) {
 /* ==========================================================================
    NOUVEAU / ÉDITION BON DE COMMANDE
    ========================================================================== */
+const PAYMENT_METHODS = ['Avoir', 'Transfert Mobile Money', 'Versement bancaire', 'Virement bancaire'];
+
+function renderPaymentMethodOptions(selectedMethod) {
+  return PAYMENT_METHODS.map((method) =>
+    `<option value="${escapeHtml(method)}" ${selectedMethod === method ? 'selected' : ''}>${escapeHtml(method)}</option>`
+  ).join('');
+}
+
 function blankDraft() {
   return { id: null, number: null, supplierId: '', headerId: '', signatureTitleId: '', signatureStampId: '', date: todayISO(), livraisonAdresse: '', items: [], payments: [{method:'Avoir',reference:'',amount:''},{method:'Transfert Mobile Money',reference:'',amount:''},{method:'Versement bancaire',reference:'',amount:''},{method:'Virement bancaire',reference:'',amount:''}], notes: '' };
 }
@@ -1501,7 +1534,7 @@ function renderOrderForm(orderId) {
     </div>
 
     <div class="card">
-      <div class="card__head"><h2 class="card__title">3. Paiement</h2></div><div class="table-wrap"><table class="payment-editor"><thead><tr><th>Moyen</th><th>Référence</th><th class="text-right">Montant (FCFA)</th></tr></thead><tbody>${(draft.payments||[]).map((p,i)=>`<tr><td>${escapeHtml(p.method)}</td><td><input class="payment-ref" data-payment-index="${i}" value="${escapeHtml(p.reference||'')}" placeholder="Référence"></td><td><input class="payment-amount text-right" type="number" min="0" step="0.01" data-payment-index="${i}" value="${p.amount??''}"></td></tr>`).join('')}<tr class="payment-total"><td colspan="2"><strong>TOTAL PAIEMENT</strong></td><td class="text-right num" id="paymentTotal">${fmtMoney((draft.payments||[]).reduce((a,p)=>a+(Number(p.amount)||0),0))}</td></tr></tbody></table></div><div class="payment-balance"><span>Reliquat sur paiement</span><strong id="paymentBalance">${fmtMoney((draft.payments||[]).reduce((a,p)=>a+(Number(p.amount)||0),0)-total)}</strong></div>
+      <div class="card__head"><h2 class="card__title">3. Paiement</h2></div><div class="table-wrap"><table class="payment-editor"><thead><tr><th>Moyen</th><th>Référence</th><th class="text-right">Montant (FCFA)</th></tr></thead><tbody>${(draft.payments||[]).map((p,i)=>`<tr><td><select class="payment-method" data-payment-index="${i}" aria-label="Moyen de paiement ligne ${i + 1}">${renderPaymentMethodOptions(p.method)}</select></td><td><input class="payment-ref" data-payment-index="${i}" value="${escapeHtml(p.reference||'')}" placeholder="Référence"></td><td><input class="payment-amount text-right" type="number" min="0" step="0.01" data-payment-index="${i}" value="${p.amount??''}"></td></tr>`).join('')}<tr class="payment-total"><td colspan="2"><strong>TOTAL PAIEMENT</strong></td><td class="text-right num" id="paymentTotal">${fmtMoney((draft.payments||[]).reduce((a,p)=>a+(Number(p.amount)||0),0))}</td></tr></tbody></table></div><div class="payment-balance"><span>Reliquat sur paiement</span><strong id="paymentBalance">${fmtMoney((draft.payments||[]).reduce((a,p)=>a+(Number(p.amount)||0),0)-total)}</strong></div>
     </div>
 
     <div class="card"><div class="card__head"><h2 class="card__title">4. Notes (optionnel)</h2></div>
@@ -1614,6 +1647,7 @@ function renderOrderForm(orderId) {
   });
 
   const refreshPaymentTotals=()=>{const paid=(draft.payments||[]).reduce((a,p)=>a+(Number(p.amount)||0),0);document.getElementById('paymentTotal').textContent=fmtMoney(paid);document.getElementById('paymentBalance').textContent=fmtMoney(paid-draft.items.reduce((a,it)=>a+it.qty*it.unitPrice,0));};
+  document.querySelectorAll('.payment-method').forEach(e=>e.addEventListener('change',ev=>draft.payments[ev.target.dataset.paymentIndex].method=ev.target.value));
   document.querySelectorAll('.payment-ref').forEach(e=>e.addEventListener('input',ev=>draft.payments[ev.target.dataset.paymentIndex].reference=ev.target.value));
   document.querySelectorAll('.payment-amount').forEach(e=>e.addEventListener('input',ev=>{draft.payments[ev.target.dataset.paymentIndex].amount=ev.target.value;refreshPaymentTotals();}));
   document.getElementById('saveDraftBtn').addEventListener('click', () => persistOrder(true));
@@ -1857,8 +1891,10 @@ function exportOrderPdf(orderId) {
   const order = load(DB.orders).find((o) => o.id === orderId);
   if (!order) return;
   const doc = buildOrderPdf(order);
-  doc.save(String(order.number).replace(/[^A-Za-z0-9\-]/g, '_') + '.pdf');
-  toast('PDF généré : ' + order.number);
+  const orderNumber = String(order.number).padStart(4, '0');
+  const fileName = `CMD N°${orderNumber}.pdf`;
+  doc.save(fileName);
+  toast('PDF généré : ' + fileName);
 }
 
 function previewOrderPdf() {
