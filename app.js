@@ -1738,7 +1738,7 @@ function buildOrderNumber(headerId) {
 // écraser des notes existantes). Le texte tapé manuellement par
 // l'utilisateur est préservé et replacé après ce bloc à chaque re-rendu.
 const AUTO_BALANCE_NOTE_START = 'Reste à livrer avant ce bon :';
-const AUTO_BALANCE_NOTE_END = '(fin du récapitulatif automatique)';
+const AUTO_BALANCE_NOTE_SEPARATOR = '- - - - - - - - - - - - - - - - - - - -';
 
 function buildAutoBalanceNoteBlock(supplierId, headerId) {
   const balances = computeDeliveryBalances(supplierId, headerId).filter((b) => b.remaining !== 0);
@@ -1750,16 +1750,16 @@ function buildAutoBalanceNoteBlock(supplierId, headerId) {
       ? `- ${b.name} : ${qty} ${unit}`
       : `- ${b.name} : ${qty} ${unit} (excédent déjà livré)`;
   });
-  return `${AUTO_BALANCE_NOTE_START}\n${lines.join('\n')}\n${AUTO_BALANCE_NOTE_END}`;
+  return `${AUTO_BALANCE_NOTE_START}\n${lines.join('\n')}`;
 }
 
 function extractManualNotes(notes) {
   if (!notes) return '';
   const startIdx = notes.indexOf(AUTO_BALANCE_NOTE_START);
   if (startIdx === -1) return notes;
-  const endIdx = notes.indexOf(AUTO_BALANCE_NOTE_END, startIdx);
-  if (endIdx === -1) return notes;
-  return notes.slice(endIdx + AUTO_BALANCE_NOTE_END.length).replace(/^\n+/, '');
+  const sepIdx = notes.indexOf(AUTO_BALANCE_NOTE_SEPARATOR, startIdx);
+  if (sepIdx === -1) return '';
+  return notes.slice(sepIdx + AUTO_BALANCE_NOTE_SEPARATOR.length).replace(/^\n+/, '');
 }
 
 function applyAutoBalanceNote(draft) {
@@ -1768,7 +1768,10 @@ function applyAutoBalanceNote(draft) {
   if (!draft.supplierId || !draft.headerId) { draft.notes = manual; return; }
   const block = buildAutoBalanceNoteBlock(draft.supplierId, draft.headerId);
   if (!block) { draft.notes = manual; return; }
-  draft.notes = manual ? `${block}\n\n${manual}` : block;
+  // Le séparateur est toujours affiché après le récap, même sans texte
+  // manuel pour l'instant : cela garde un repère stable pour ne jamais
+  // perdre ce que l'utilisateur tape ensuite, même juste après le récap.
+  draft.notes = `${block}\n${AUTO_BALANCE_NOTE_SEPARATOR}` + (manual ? `\n${manual}` : '');
 }
 
 function renderOrderForm(orderId) {
