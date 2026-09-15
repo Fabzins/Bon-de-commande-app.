@@ -1733,6 +1733,44 @@ function buildOrderNumber(headerId) {
   return getNextOrderNumber(headerId);
 }
 
+// Bloc récapitulatif du reste à livrer, inséré automatiquement dans les
+// notes d'un NOUVEAU bon (jamais sur un bon déjà enregistré, pour ne pas
+// écraser des notes existantes). Le texte tapé manuellement par
+// l'utilisateur est préservé et replacé après ce bloc à chaque re-rendu.
+const AUTO_BALANCE_NOTE_START = 'Reste à livrer avant ce bon :';
+const AUTO_BALANCE_NOTE_END = '(fin du récapitulatif automatique)';
+
+function buildAutoBalanceNoteBlock(supplierId, headerId) {
+  const balances = computeDeliveryBalances(supplierId, headerId).filter((b) => b.remaining !== 0);
+  if (!balances.length) return '';
+  const lines = balances.map((b) => {
+    const qty = fmtQuantity(Math.abs(b.remaining));
+    const unit = b.unit || '';
+    return b.remaining > 0
+      ? `- ${b.name} : ${qty} ${unit}`
+      : `- ${b.name} : ${qty} ${unit} (excédent déjà livré)`;
+  });
+  return `${AUTO_BALANCE_NOTE_START}\n${lines.join('\n')}\n${AUTO_BALANCE_NOTE_END}`;
+}
+
+function extractManualNotes(notes) {
+  if (!notes) return '';
+  const startIdx = notes.indexOf(AUTO_BALANCE_NOTE_START);
+  if (startIdx === -1) return notes;
+  const endIdx = notes.indexOf(AUTO_BALANCE_NOTE_END, startIdx);
+  if (endIdx === -1) return notes;
+  return notes.slice(endIdx + AUTO_BALANCE_NOTE_END.length).replace(/^\n+/, '');
+}
+
+function applyAutoBalanceNote(draft) {
+  if (draft.id) return; // uniquement pour les nouveaux bons, pas en édition
+  const manual = extractManualNotes(draft.notes);
+  if (!draft.supplierId || !draft.headerId) { draft.notes = manual; return; }
+  const block = buildAutoBalanceNoteBlock(draft.supplierId, draft.headerId);
+  if (!block) { draft.notes = manual; return; }
+  draft.notes = manual ? `${block}\n\n${manual}` : block;
+}
+
 function renderOrderForm(orderId) {
   const suppliers = load(DB.suppliers);
   const headers = load(DB.headers);
@@ -1769,6 +1807,7 @@ function renderOrderForm(orderId) {
   const selectedStampId = draft.signatureStampId || selectedStamp?.id || '';
   const total = draft.items.reduce((s, it) => s + it.qty * it.unitPrice, 0);
   draft.payments=(draft.payments||[]).map(p=>({...p,amount:Number(p.amount)||0}));
+  applyAutoBalanceNote(draft);
 
   view.innerHTML = `
     <div class="number-badge">
@@ -1873,6 +1912,7 @@ function renderOrderForm(orderId) {
     </div>
 
     <div class="card"><div class="card__head"><h2 class="card__title">4. Notes (optionnel)</h2></div>
+      ${!isEditing ? '<div class="text-muted" style="font-size:12.5px;margin-bottom:8px">Le reste à livrer déjà connu pour ce fournisseur et cet émetteur est ajouté ici automatiquement. Vous pouvez ajouter votre propre texte en dessous.</div>' : ''}
       <textarea id="orderNotes" placeholder="Conditions de livraison, remarques…">${escapeHtml(draft.notes || '')}</textarea>
     </div>
 
