@@ -9,6 +9,7 @@ const DB = {
   products:  'bc_products',
   orders:    'bc_orders',
   deliveryAddresses: 'bc_delivery_addresses',
+  deliveries: 'bc_deliveries',
   stamps: 'bc_stamps',
   signatureTitles: 'bc_signature_titles',
 };
@@ -688,6 +689,10 @@ let state = {
   dashboardEmitterFilter: '',
   historyFilter: '',
   historyEmitterFilter: '',
+  deliveryDraft: null,        // livraison en cours de création/édition
+  deliveryFilterSupplier: '',
+  deliveryFilterEmitter: '',
+  deliveryFilterProduct: '',
 };
 
 /* ---------- Toast ---------- */
@@ -731,6 +736,7 @@ const VIEW_TITLES = {
   suppliers: 'Fournisseurs',
   products: 'Produits',
   'delivery-addresses': 'Adresses de livraison',
+  deliveries: 'Livraisons',
   headers: 'Émetteur',
 };
 
@@ -749,6 +755,7 @@ function navigate(view, params = {}) {
   if (view === 'suppliers') renderSuppliers();
   if (view === 'products') renderProducts();
   if (view === 'delivery-addresses') renderDeliveryAddresses();
+  if (view === 'deliveries') renderDeliveries();
   if (view === 'headers') renderHeaders();
 }
 
@@ -1127,6 +1134,334 @@ function openDeliveryAddressModal(id) {
       closeModal();
       renderDeliveryAddresses();
       toast(existing ? 'Adresse modifiée.' : 'Adresse ajoutée.');
+    });
+  });
+}
+
+/* ==========================================================================
+   LIVRAISONS
+   ========================================================================== */
+function getOrderedQuantities(supplierId, headerId) {
+  const orders = load(DB.orders).filter((o) => o.supplierId === supplierId && o.headerId === headerId);
+  const map = {};
+  orders.forEach((o) => (o.items || []).forEach((it) => {
+    map[it.productId] = (map[it.productId] || 0) + (Number(it.qty) || 0);
+  }));
+  return map;
+}
+
+function getDeliveredQuantities(supplierId, headerId, excludeDeliveryId) {
+  const deliveries = load(DB.deliveries).filter((d) => d.supplierId === supplierId && d.headerId === headerId && d.id !== excludeDeliveryId);
+  const map = {};
+  deliveries.forEach((d) => (d.items || []).forEach((it) => {
+    map[it.productId] = (map[it.productId] || 0) + (Number(it.qty) || 0);
+  }));
+  return map;
+}
+
+// Reste à livrer = quantité totale commandée - quantité totale livrée,
+// pour un fournisseur et un émetteur donnés, produit par produit.
+// excludeDeliveryId permet, lors de la modification d'une livraison existante,
+// de ne pas compter deux fois ses propres lignes.
+function computeDeliveryBalances(supplierId, headerId, excludeDeliveryId) {
+  const products = load(DB.products);
+  const ordered = getOrderedQuantities(supplierId, headerId);
+  const delivered = getDeliveredQuantities(supplierId, headerId, excludeDeliveryId);
+  const ids = new Set([...Object.keys(ordered), ...Object.keys(delivered)]);
+  return [...ids].map((pid) => {
+    const p = products.find((x) => x.id === pid);
+    const orderedQty = ordered[pid] || 0;
+    const deliveredQty = delivered[pid] || 0;
+    return {
+      productId: pid,
+      name: p?.name || 'Produit supprimé',
+      unit: p?.unit || '',
+      ordered: orderedQty,
+      delivered: deliveredQty,
+      remaining: orderedQty - deliveredQty,
+    };
+  }).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function renderDeliveries() {
+  const suppliers = load(DB.suppliers);
+  const headers = load(DB.headers);
+  const products = load(DB.products);
+  const orders = load(DB.orders);
+  const deliveries = [...load(DB.deliveries)].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+  const supplierName = (id) => suppliers.find((s) => s.id === id)?.name || '—';
+  const headerName = (id) => headers.find((h) => h.id === id)?.name || '—';
+
+  let filteredDeliveries = deliveries;
+  if (state.deliveryFilterSupplier) filteredDeliveries = filteredDeliveries.filter((d) => d.supplierId === state.deliveryFilterSupplier);
+  if (state.deliveryFilterEmitter) filteredDeliveries = filteredDeliveries.filter((d) => d.headerId === state.deliveryFilterEmitter);
+  if (state.deliveryFilterProduct) filteredDeliveries = filteredDeliveries.filter((d) => (d.items || []).some((it) => it.productId === state.deliveryFilterProduct));
+
+  // Toutes les paires fournisseur/émetteur apparues dans les bons ou les livraisons
+  const pairs = new Set();
+  orders.forEach((o) => { if (o.supplierId && o.headerId) pairs.add(o.supplierId + '::' + o.headerId); });
+  deliveries.forEach((d) => { if (d.supplierId && d.headerId) pairs.add(d.supplierId + '::' + d.headerId); });
+
+  let balanceRows = [];
+  pairs.forEach((pair) => {
+    const [supplierId, headerId] = pair.split('::');
+    if (state.deliveryFilterSupplier && supplierId !== state.deliveryFilterSupplier) return;
+    if (state.deliveryFilterEmitter && headerId !== state.deliveryFilterEmitter) return;
+    computeDeliveryBalances(supplierId, headerId).forEach((b) => {
+      if (state.deliveryFilterProduct && b.productId !== state.deliveryFilterProduct) return;
+      balanceRows.push({ supplierId, headerId, ...b });
+    });
+  });
+  balanceRows.sort((a, b) =>
+    supplierName(a.supplierId).localeCompare(supplierName(b.supplierId)) ||
+    headerName(a.headerId).localeCompare(headerName(b.headerId)) ||
+    a.name.localeCompare(b.name)
+  );
+
+  const filterHtml = `
+    <div class="filter-row">
+      <select id="deliveryFilterSupplier" aria-label="Filtrer par fournisseur">
+        <option value="">Tous les fournisseurs</option>
+        ${suppliers.map((s) => `<option value="${s.id}" ${state.deliveryFilterSupplier === s.id ? 'selected' : ''}>${escapeHtml(s.name)}</option>`).join('')}
+      </select>
+      <select id="deliveryFilterEmitter" aria-label="Filtrer par émetteur">
+        <option value="">Tous les émetteurs</option>
+        ${headers.map((h) => `<option value="${h.id}" ${state.deliveryFilterEmitter === h.id ? 'selected' : ''}>${escapeHtml(h.name)}</option>`).join('')}
+      </select>
+      <select id="deliveryFilterProduct" aria-label="Filtrer par produit">
+        <option value="">Tous les produits</option>
+        ${products.map((p) => `<option value="${p.id}" ${state.deliveryFilterProduct === p.id ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('')}
+      </select>
+    </div>`;
+
+  const balanceTableHtml = balanceRows.length ? `<div class="table-wrap"><table>
+    <thead><tr><th>Fournisseur</th><th>Émetteur</th><th>Produit</th><th class="text-right">Commandé</th><th class="text-right">Livré</th><th class="text-right">Reste à livrer</th></tr></thead>
+    <tbody>
+      ${balanceRows.map((r) => {
+        const badge = r.remaining > 0
+          ? `<span class="badge badge-rust">${fmtQuantity(r.remaining)} ${escapeHtml(r.unit || '')}</span>`
+          : r.remaining < 0
+          ? `<span class="badge badge-brass">+${fmtQuantity(-r.remaining)} ${escapeHtml(r.unit || '')} (excédent)</span>`
+          : `<span class="badge badge-pine">Soldé</span>`;
+        return `<tr>
+          <td>${escapeHtml(supplierName(r.supplierId))}</td>
+          <td>${escapeHtml(headerName(r.headerId))}</td>
+          <td>${escapeHtml(r.name)}</td>
+          <td class="text-right num">${fmtQuantity(r.ordered)} ${escapeHtml(r.unit || '')}</td>
+          <td class="text-right num">${fmtQuantity(r.delivered)} ${escapeHtml(r.unit || '')}</td>
+          <td class="text-right">${badge}</td>
+        </tr>`;
+      }).join('')}
+    </tbody>
+  </table></div>` : emptyState('Rien à afficher', 'Aucun bon de commande ou livraison ne correspond à ces filtres.');
+
+  const deliveriesTableHtml = filteredDeliveries.length ? `<div class="table-wrap"><table>
+    <thead><tr><th>Date</th><th>Bordereau</th><th>Fournisseur</th><th>Émetteur</th><th>Produits livrés</th><th></th></tr></thead>
+    <tbody>
+      ${filteredDeliveries.map((d) => `
+        <tr>
+          <td>${fmtDate(d.date)}</td>
+          <td><span class="chip-code">${escapeHtml(d.bordereau || '—')}</span></td>
+          <td>${escapeHtml(supplierName(d.supplierId))}</td>
+          <td>${escapeHtml(headerName(d.headerId))}</td>
+          <td>${(d.items || []).map((it) => `${escapeHtml(it.name)} (${fmtQuantity(it.qty)} ${escapeHtml(it.unit || '')})`).join(', ') || '—'}</td>
+          <td class="row-actions">
+            <button class="btn btn-ghost btn-sm" data-edit-delivery="${d.id}">Modifier</button>
+            <button class="btn btn-danger btn-sm" data-del-delivery="${d.id}">Supprimer</button>
+          </td>
+        </tr>`).join('')}
+    </tbody>
+  </table></div>` : emptyState('Aucune livraison enregistrée', 'Enregistrez une livraison pour suivre le reste à livrer.');
+
+  const view = document.getElementById('view');
+  view.innerHTML = `
+    <div class="card">
+      <div class="card__head">
+        <div>
+          <h2 class="card__title">Reste à livrer</h2>
+          <div class="card__subtitle">Calculé automatiquement à partir des bons de commande et des livraisons enregistrées, par fournisseur et par émetteur</div>
+        </div>
+      </div>
+      ${filterHtml}
+      ${balanceTableHtml}
+    </div>
+
+    <div class="card">
+      <div class="card__head">
+        <div>
+          <h2 class="card__title">Livraisons enregistrées</h2>
+          <div class="card__subtitle">Historique des bordereaux de livraison saisis</div>
+        </div>
+        <button class="btn btn-brass" id="addDelivery">+ Enregistrer une livraison</button>
+      </div>
+      ${deliveriesTableHtml}
+    </div>
+  `;
+
+  document.getElementById('addDelivery').addEventListener('click', () => openDeliveryModal());
+  document.getElementById('deliveryFilterSupplier').addEventListener('change', (e) => { state.deliveryFilterSupplier = e.target.value; renderDeliveries(); });
+  document.getElementById('deliveryFilterEmitter').addEventListener('change', (e) => { state.deliveryFilterEmitter = e.target.value; renderDeliveries(); });
+  document.getElementById('deliveryFilterProduct').addEventListener('change', (e) => { state.deliveryFilterProduct = e.target.value; renderDeliveries(); });
+
+  document.querySelectorAll('[data-edit-delivery]').forEach((b) =>
+    b.addEventListener('click', () => openDeliveryModal(b.dataset.editDelivery))
+  );
+  document.querySelectorAll('[data-del-delivery]').forEach((b) =>
+    b.addEventListener('click', () => {
+      if (confirm('Supprimer cette livraison ?')) {
+        save(DB.deliveries, load(DB.deliveries).filter((d) => d.id !== b.dataset.delDelivery));
+        renderDeliveries();
+        toast('Livraison supprimée.');
+      }
+    })
+  );
+
+  if (suppliers.length === 0 || headers.length === 0) {
+    toast('Astuce : ajoutez au moins un fournisseur et un émetteur pour enregistrer une livraison.');
+  }
+}
+
+function openDeliveryModal(id) {
+  const existing = id ? load(DB.deliveries).find((d) => d.id === id) : null;
+  state.deliveryDraft = existing ? JSON.parse(JSON.stringify(existing)) : {
+    id: null, date: todayISO(), supplierId: '', headerId: '', bordereau: '', address: '', items: [],
+  };
+  renderDeliveryModal();
+}
+
+function renderDeliveryModal() {
+  const draft = state.deliveryDraft;
+  const suppliers = load(DB.suppliers);
+  const headers = load(DB.headers);
+  const products = load(DB.products);
+  const addresses = load(DB.deliveryAddresses);
+  const isEditing = !!draft.id;
+
+  const balances = (draft.supplierId && draft.headerId) ? computeDeliveryBalances(draft.supplierId, draft.headerId, draft.id) : [];
+  const balanceFor = (pid) => balances.find((b) => b.productId === pid);
+
+  const itemsRows = draft.items.map((it) => {
+    const bal = balanceFor(it.productId);
+    return `<tr>
+      <td>${escapeHtml(it.name)}</td>
+      <td><input class="delivery-line-qty" type="text" inputmode="decimal" data-line-id="${it.lineId}" value="${fmtQuantity(it.qty)}" aria-label="Quantité livrée"></td>
+      <td>${escapeHtml(it.unit || '')}</td>
+      <td class="text-muted" style="font-size:12px">${bal ? 'Reste avant cette ligne : ' + fmtQuantity(bal.remaining) + ' ' + escapeHtml(bal.unit || '') : '—'}</td>
+      <td><button type="button" class="btn btn-danger btn-sm" data-remove-delivery-line="${it.lineId}">&times;</button></td>
+    </tr>`;
+  }).join('');
+
+  const bodyHtml = `
+    <form id="deliveryForm">
+      <div class="field-row">
+        <div class="field"><label>Date de livraison *</label><input name="date" type="date" required value="${draft.date}"></div>
+        <div class="field"><label>N° du bordereau de livraison *</label><input name="bordereau" required value="${escapeHtml(draft.bordereau || '')}"></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>Fournisseur *</label>
+          <select id="deliverySupplierSelect" ${suppliers.length ? '' : 'disabled'}>
+            <option value="">Sélectionner…</option>
+            ${suppliers.map((s) => `<option value="${s.id}" ${draft.supplierId === s.id ? 'selected' : ''}>${escapeHtml(s.name)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field"><label>Émetteur *</label>
+          <select id="deliveryHeaderSelect" ${headers.length ? '' : 'disabled'}>
+            <option value="">Sélectionner…</option>
+            ${headers.map((h) => `<option value="${h.id}" ${draft.headerId === h.id ? 'selected' : ''}>${escapeHtml(h.name)}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <label>Adresse de livraison / réception</label>
+        <select id="deliveryAddressSelect">
+          <option value="">— Choisir une adresse enregistrée —</option>
+          ${addresses.map((a) => `<option value="${a.id}" ${a.address === draft.address ? 'selected' : ''}>${escapeHtml(a.name)}</option>`).join('')}
+        </select>
+        <input name="address" id="deliveryAddressInput" placeholder="Ou saisir librement" value="${escapeHtml(draft.address || '')}" style="margin-top:8px">
+      </div>
+
+      <div class="field">
+        <label>Produits livrés *</label>
+        ${!draft.supplierId || !draft.headerId ? '<div class="text-muted" style="font-size:12.5px;margin-bottom:8px">Choisissez un fournisseur et un émetteur pour voir le reste à livrer par produit.</div>' : ''}
+        <div class="table-wrap"><table>
+          <thead><tr><th>Produit</th><th>Qté livrée</th><th>Unité</th><th></th><th></th></tr></thead>
+          <tbody>${itemsRows || '<tr><td colspan="5" class="text-muted">Aucun produit ajouté</td></tr>'}</tbody>
+        </table></div>
+        <div class="field-row" style="margin-top:10px">
+          <div class="field"><label>Produit</label>
+            <select id="deliveryProductSelect">
+              <option value="">Sélectionner…</option>
+              ${products.map((p) => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field"><label>Quantité</label><input id="deliveryQtyInput" type="text" inputmode="decimal" value="1"></div>
+        </div>
+        <button type="button" class="btn btn-ghost btn-sm" id="addDeliveryLineBtn">+ Ajouter ce produit</button>
+      </div>
+
+      <div class="modal__actions">
+        <button type="button" class="btn btn-ghost" data-close-modal>Annuler</button>
+        <button type="submit" class="btn btn-primary">${isEditing ? 'Enregistrer' : 'Ajouter'}</button>
+      </div>
+    </form>
+  `;
+
+  openModal(isEditing ? 'Modifier la livraison' : 'Nouvelle livraison', bodyHtml, (modal) => {
+    modal.querySelector('#deliverySupplierSelect')?.addEventListener('change', (e) => { draft.supplierId = e.target.value; renderDeliveryModal(); });
+    modal.querySelector('#deliveryHeaderSelect')?.addEventListener('change', (e) => { draft.headerId = e.target.value; renderDeliveryModal(); });
+    modal.querySelector('#deliveryAddressSelect')?.addEventListener('change', (e) => {
+      const a = addresses.find((x) => x.id === e.target.value);
+      if (a) { draft.address = a.address; renderDeliveryModal(); }
+    });
+    modal.querySelector('#deliveryAddressInput')?.addEventListener('input', (e) => { draft.address = e.target.value; });
+    modal.querySelector('input[name="date"]')?.addEventListener('change', (e) => { draft.date = e.target.value; });
+    modal.querySelector('input[name="bordereau"]')?.addEventListener('input', (e) => { draft.bordereau = e.target.value; });
+
+    modal.querySelector('#addDeliveryLineBtn')?.addEventListener('click', () => {
+      const pid = modal.querySelector('#deliveryProductSelect').value;
+      const qty = parseQuantity(modal.querySelector('#deliveryQtyInput').value);
+      const p = products.find((x) => x.id === pid);
+      if (!p || !qty) { toast('Sélectionnez un produit et une quantité valide.'); return; }
+      draft.items.push({ lineId: uid(), productId: p.id, name: p.name, unit: p.unit || '', qty });
+      renderDeliveryModal();
+    });
+    modal.querySelectorAll('[data-remove-delivery-line]').forEach((b) =>
+      b.addEventListener('click', () => {
+        draft.items = draft.items.filter((it) => it.lineId !== b.dataset.removeDeliveryLine);
+        renderDeliveryModal();
+      })
+    );
+    modal.querySelectorAll('.delivery-line-qty').forEach((input) =>
+      input.addEventListener('change', (e) => {
+        const line = draft.items.find((it) => it.lineId === e.target.dataset.lineId);
+        if (line) line.qty = parseQuantity(e.target.value);
+        renderDeliveryModal();
+      })
+    );
+
+    modal.querySelector('#deliveryForm').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      draft.date = fd.get('date') || draft.date;
+      draft.bordereau = String(fd.get('bordereau') || '').trim();
+      draft.address = fd.get('address') || draft.address || '';
+      if (!draft.supplierId) { toast('Sélectionnez un fournisseur.'); return; }
+      if (!draft.headerId) { toast('Sélectionnez un émetteur.'); return; }
+      if (!draft.bordereau) { toast('Indiquez le numéro du bordereau de livraison.'); return; }
+      if (!draft.items.length) { toast('Ajoutez au moins un produit livré.'); return; }
+      const list = load(DB.deliveries);
+      if (draft.id) {
+        const idx = list.findIndex((d) => d.id === draft.id);
+        list[idx] = { ...list[idx], ...draft };
+      } else {
+        list.push({ ...draft, id: uid(), createdAt: Date.now() });
+      }
+      save(DB.deliveries, list);
+      state.deliveryDraft = null;
+      closeModal();
+      renderDeliveries();
+      toast(draft.id ? 'Livraison modifiée.' : 'Livraison enregistrée.');
     });
   });
 }

@@ -209,6 +209,7 @@ tbody tr:hover{background:var(--paper);}
 }
 .badge-pine{background:var(--pine-soft); color:var(--pine);}
 .badge-brass{background:var(--brass-soft); color:#8a611c;}
+.badge-rust{background:var(--rust-soft); color:var(--rust);}
 
 .chip-code{
   font-family:var(--font-mono); font-size:12px; font-weight:600;
