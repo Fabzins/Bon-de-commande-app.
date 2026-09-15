@@ -1744,7 +1744,9 @@ function buildAutoBalanceNoteBlock(supplierId, headerId) {
   const balances = computeDeliveryBalances(supplierId, headerId).filter((b) => b.remaining !== 0);
   if (!balances.length) return '';
   const lines = balances.map((b) => {
-    const qty = fmtQuantity(Math.abs(b.remaining));
+    // Utiliser des espaces classiques : le bloc est aussi imprimé dans le PDF,
+    // dont la police standard ne sait pas afficher les séparateurs Unicode.
+    const qty = fmtQuantityPdf(Math.abs(b.remaining));
     const unit = b.unit || '';
     return b.remaining > 0
       ? `- ${b.name} : ${qty} ${unit}`
@@ -2259,7 +2261,7 @@ function buildOrderPdf(order) {
   y=doc.lastAutoTable.finalY+18; doc.setFont('helvetica','bold'); doc.setFontSize(9.5); doc.setTextColor(...INK); doc.text('Reliquat sur paiement : '+fmtMoneyPdf(paidTotal-(Number(order.total)||0))+' FCFA',margin,y); y+=26;
   doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.setTextColor(...INK); const words = numberToFrenchWords(order.total) + ' francs CFA'; const line = 'Arrêté le bon de commande à la somme de : ' + words + '.'; const split = doc.splitTextToSize(line, pageWidth - margin * 2); doc.text(split, margin, y); y += split.length * 13 + 6;
   doc.setDrawColor(...LINE); const dotsY = y; doc.setLineDashPattern([1, 1.5], 0); doc.line(margin, dotsY, pageWidth - margin, dotsY); doc.setLineDashPattern([], 0);
-  if (order.notes) { y += 22; doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(...INK); doc.text('Notes', margin, y); doc.setFont('helvetica', 'normal'); doc.setTextColor(...INK_SOFT); const splitNotes = doc.splitTextToSize(order.notes, pageWidth - margin * 2); doc.text(splitNotes, margin, y + 13); y += 13 + splitNotes.length * 12; }
+  if (order.notes) { y += 22; doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(...INK); doc.text('Notes', margin, y); doc.setFont('helvetica', 'normal'); doc.setTextColor(...INK_SOFT); const pdfNotes = order.notes.replace(/[\u202F\u00A0]/g, ' '); const splitNotes = doc.splitTextToSize(pdfNotes, pageWidth - margin * 2); doc.text(splitNotes, margin, y + 13); y += 13 + splitNotes.length * 12; }
   const signatureTitles = ensureSignatureTitles(); const stamps = load(DB.stamps); const signatureTitle = getOrderSignatureTitle(order, header, signatureTitles); const stamp = getOrderSignatureStamp(order, header, stamps);
   const sigY = Math.max(y + 40, doc.internal.pageSize.getHeight() - 105); doc.setFont('helvetica', 'bold'); doc.setFontSize(10.5); doc.setTextColor(...INK); if (signatureTitle?.name) doc.text(signatureTitle.name, pageWidth - margin, sigY, { align: 'right' }); if (stamp?.image) { try { doc.addImage(stamp.image, pageWidth - margin - 90, sigY + 8, 90, 55); } catch (e) {} }
   return doc;
