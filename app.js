@@ -428,8 +428,7 @@ function subscribeCloudCollection(docRef, key) {
     saveCloudPending(pending);
     if (Object.keys(pending).length) queueCloudSync();
 
-    cloudSync.status = 'connected';
-    cloudSync.error = null;
+    if (!cloudSync.pushFailed) { cloudSync.status = 'connected'; cloudSync.error = null; }
     cloudSync.lastSyncedAt = Date.now();
     updateSyncButton();
     if (changed && cloudInitialSyncDone) {
@@ -484,7 +483,8 @@ async function pushCloudSyncNow() {
   const pending = getCloudPending();
   const entries = Object.values(pending);
   if (!entries.length) {
-    cloudSync.status = 'connected'; cloudSync.lastSyncedAt = Date.now(); updateSyncButton();
+    cloudSync.pushFailed = false;
+    cloudSync.status = 'connected'; cloudSync.error = null; cloudSync.lastSyncedAt = Date.now(); updateSyncButton();
     return;
   }
   try {
@@ -492,44 +492,72 @@ async function pushCloudSyncNow() {
     const captured = entries.map(p => ({ ...p, data: p.deleted ? null : (p.data || load(p.collection).find(x => String(x.id) === String(p.id)) || null) }));
     const writes = captured.filter(p => p.deleted || p.data);
 
-    // Firestore limite un batch à 500 écritures. 450 laisse une marge pour les métadonnées.
-    for (let i = 0; i < writes.length; i += 450) {
-      const batch = fbDb.batch();
-      writes.slice(i, i + 450).forEach(p => {
-        const ref = workspaceRef.collection(p.collection).doc(String(p.id));
-        if (p.deleted) {
-          batch.set(ref, {
-            id: String(p.id),
-            _deleted: true,
-            _syncUpdatedAt: Number(p.data?._syncUpdatedAt || p.queuedAt || Date.now()),
-            _syncDeviceId: String(p.deviceId || getCloudDeviceId()),
-            _deviceId: getCloudDeviceId(),
-            _serverUpdatedAt: firebase.firestore.FieldValue.serverTimestamp()
-          }, { merge: true });
-        } else {
-          batch.set(ref, {
-            ...p.data,
-            id: String(p.id),
-            _deleted: false,
-            _syncUpdatedAt: Number(p.data?._syncUpdatedAt || p.queuedAt || Date.now()),
-            _syncDeviceId: String(p.data?._syncDeviceId || p.deviceId || getCloudDeviceId()),
-            _deviceId: getCloudDeviceId(),
-            _serverUpdatedAt: firebase.firestore.FieldValue.serverTimestamp()
-          }, { merge: false });
+    const refFor = p => workspaceRef.collection(p.collection).doc(String(p.id));
+    const payloadFor = p => p.deleted ? {
+      id: String(p.id),
+      _deleted: true,
+      _syncUpdatedAt: Number(p.data?._syncUpdatedAt || p.queuedAt || Date.now()),
+      _syncDeviceId: String(p.deviceId || getCloudDeviceId()),
+      _deviceId: getCloudDeviceId(),
+      _serverUpdatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    } : {
+      ...p.data,
+      id: String(p.id),
+      _deleted: false,
+      _syncUpdatedAt: Number(p.data?._syncUpdatedAt || p.queuedAt || Date.now()),
+      _syncDeviceId: String(p.data?._syncDeviceId || p.deviceId || getCloudDeviceId()),
+      _deviceId: getCloudDeviceId(),
+      _serverUpdatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    };
+
+    // Firestore refuse un document de plus de 1 Mio (ex. logo/cachet en photo brute).
+    // Un tel document ne doit pas bloquer tous les autres envois.
+    const MAX_DOC_CHARS = 950000;
+    const done = [], failed = [], sendable = [];
+    writes.forEach(p => {
+      if (!p.deleted && recordSignature(p.data).length > MAX_DOC_CHARS) {
+        failed.push({ p, err: new Error('document trop volumineux (image trop lourde : rechargez-la)') });
+      } else sendable.push(p);
+    });
+
+    for (let i = 0; i < sendable.length; i += 200) {
+      const chunk = sendable.slice(i, i + 200);
+      try {
+        const batch = fbDb.batch();
+        chunk.forEach(p => batch.set(refFor(p), payloadFor(p), { merge: !!p.deleted }));
+        await batch.commit();
+        done.push(...chunk);
+      } catch (_) {
+        // Le lot a échoué : on réessaie document par document pour isoler le fautif.
+        for (const p of chunk) {
+          try { await refFor(p).set(payloadFor(p), { merge: !!p.deleted }); done.push(p); }
+          catch (e) { failed.push({ p, err: e }); }
         }
-      });
-      await batch.commit();
+      }
     }
 
     const latest = getCloudPending();
-    writes.forEach(p => {
+    done.forEach(p => {
       const pk = pendingKey(p.collection, p.id);
       const current = latest[pk];
       const currentData = current?.deleted ? null : current?.data;
       if (current && current.deleted === p.deleted && recordSignature(currentData) === recordSignature(p.data)) delete latest[pk];
     });
     saveCloudPending(latest);
-    cloudSync.status = 'connected'; cloudSync.error = null; cloudSync.lastSyncedAt = Date.now(); updateSyncButton();
+
+    if (failed.length) {
+      const f = failed[0];
+      const label = (f.p.data && (f.p.data.name || f.p.data.title)) || f.p.id;
+      cloudSync.pushFailed = true;
+      cloudSync.status = 'error';
+      cloudSync.error = `${failed.length} élément(s) non envoyé(s) — ${f.p.collection} « ${label} » : ${f.err.message || f.err}`;
+      console.error('Éléments non synchronisés', failed);
+      updateSyncButton();
+      toast('Synchro incomplète : ' + cloudSync.error);
+    } else {
+      cloudSync.pushFailed = false;
+      cloudSync.status = 'connected'; cloudSync.error = null; cloudSync.lastSyncedAt = Date.now(); updateSyncButton();
+    }
   } catch (err) {
     cloudSync.status = 'error'; cloudSync.error = err.message || String(err); updateSyncButton();
   }
@@ -617,6 +645,37 @@ function openSyncModal() {
   });
 }
 
+function readImageAsDataUrl(file, maxDim = 700) {
+  // Redimensionne logos/cachets pour rester très en dessous de la limite
+  // de 1 Mio par document Firestore (une photo brute de téléphone la dépasse).
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onerror = () => reject(fr.error);
+    fr.onload = () => {
+      const src = fr.result;
+      if (!/^data:image\/(png|jpe?g|webp|gif)/i.test(src)) return resolve(src);
+      const img = new Image();
+      img.onerror = () => resolve(src);
+      img.onload = () => {
+        const isPng = /^data:image\/(png|gif)/i.test(src);
+        let dim = maxDim, out = src;
+        for (let i = 0; i < 6; i++) {
+          const scale = Math.min(1, dim / Math.max(img.width, img.height));
+          const c = document.createElement('canvas');
+          c.width = Math.max(1, Math.round(img.width * scale));
+          c.height = Math.max(1, Math.round(img.height * scale));
+          c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+          out = isPng ? c.toDataURL('image/png') : c.toDataURL('image/jpeg', 0.85);
+          if (out.length <= 600000) break;
+          dim = Math.round(dim * 0.75);
+        }
+        resolve(out);
+      };
+      img.src = src;
+    };
+    fr.readAsDataURL(file);
+  });
+}
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
 function todayISO() { return new Date().toISOString().slice(0, 10); }
 function fmtDate(iso) {
@@ -1643,16 +1702,14 @@ function openHeaderModal(id) {
       const name = String(modal.querySelector('#newStampName')?.value || '').trim();
       const file = modal.querySelector('#newStampImage')?.files?.[0];
       if (!name || !file) { toast('Saisissez le nom et sélectionnez l’image du cachet.'); return; }
-      const reader = new FileReader();
-      reader.onload = () => {
+      readImageAsDataUrl(file).then(imageUrl => {
         const list = load(DB.stamps);
-        const item = { id: uid(), name, image: reader.result };
+        const item = { id: uid(), name, image: imageUrl };
         list.push(item); save(DB.stamps, list);
         const option = document.createElement('option'); option.value = item.id; option.textContent = item.name; stampSelect.appendChild(option); stampSelect.value = item.id;
         modal.querySelector('#newStampName').value = ''; modal.querySelector('#newStampImage').value = ''; modal.querySelector('#newStampBox').style.display = 'none';
         toast('Cachet ajouté et associé à cet émetteur.');
-      };
-      reader.readAsDataURL(file);
+      });
     });
 
     modal.querySelector('#headerForm').addEventListener('submit', e => {
@@ -1672,7 +1729,7 @@ function openHeaderModal(id) {
         else list.push({ id: uid(), ...payload });
         save(DB.headers, list); closeModal(); renderHeaders(); toast(existing ? 'Émetteur modifié.' : 'Émetteur ajouté.');
       };
-      if (file && file.size > 0) { const reader = new FileReader(); reader.onload = () => finish(reader.result); reader.readAsDataURL(file); } else finish(null);
+      if (file && file.size > 0) { readImageAsDataUrl(file).then(finish); } else finish(null);
     });
   });
 }
@@ -2330,7 +2387,7 @@ function openStampModal(id) {
         if (existing) { const idx = list.findIndex(x => x.id === existing.id); list[idx] = { ...existing, ...payload }; } else list.push({ id: uid(), ...payload });
         save(DB.stamps, list); closeModal(); renderHeaders(); toast(existing ? 'Cachet modifié.' : 'Cachet ajouté.');
       };
-      if (file && file.size > 0) { const reader = new FileReader(); reader.onload = () => finish(reader.result); reader.readAsDataURL(file); } else finish(null);
+      if (file && file.size > 0) { readImageAsDataUrl(file).then(finish); } else finish(null);
     });
   });
 }

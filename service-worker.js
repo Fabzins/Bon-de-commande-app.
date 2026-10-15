@@ -1,4 +1,4 @@
-const CACHE_NAME = 'bc-app-v26-longpoll';
+const CACHE_NAME = 'bc-app-v27-sync-robuste';
 const ASSETS = [
   './',
   './index.html',
