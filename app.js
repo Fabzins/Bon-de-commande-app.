@@ -440,6 +440,7 @@ function subscribeCloudCollection(docRef, key) {
     cloudSync.status = 'error';
     cloudSync.error = err.message || String(err);
     updateSyncButton();
+    console.error('Firestore listener error', key, err);
   });
 }
 
@@ -452,6 +453,9 @@ async function startCloudSync() {
     if (!fbApp) fbApp = firebase.apps?.length ? firebase.app() : firebase.initializeApp(cfg.firebaseConfig);
     if (!firebase.auth().currentUser) await firebase.auth().signInAnonymously();
     fbDb = firebase.firestore();
+    // Long polling : évite le blocage du canal WebChannel « Listen » par
+    // certains navigateurs/extensions/antivirus/proxys sur PC.
+    try { fbDb.settings({ experimentalForceLongPolling: true, merge: true }); } catch (_) {}
     const docRef = fbDb.collection('workspaces').doc(cfg.syncCode);
 
     await migrateLegacyWorkspace(docRef);

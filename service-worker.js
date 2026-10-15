@@ -1,4 +1,4 @@
-const CACHE_NAME = 'bc-app-v25-android';
+const CACHE_NAME = 'bc-app-v26-longpoll';
 const ASSETS = [
   './',
   './index.html',
